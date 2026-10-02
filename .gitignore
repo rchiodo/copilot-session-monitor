@@ -1,0 +1,31 @@
+# Private monitor/Copilot state and generated evidence
+/.local/
+/.copilot/
+/session-state/
+/.generated/
+/evidence/
+/recordings/
+/screenshots/
+/tmp/
+/temp/
+
+# Local dependencies, configuration, and editor state
+/node_modules/
+.env
+.env.*
+/.vscode/
+/.idea/
+
+# Logs, temporary files, and databases
+*.log
+*.tmp
+*.bak
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.sqlite-shm
+*.sqlite-wal
+Thumbs.db
+.DS_Store
