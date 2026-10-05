@@ -131,7 +131,22 @@ export class Collector {
       }
       return member;
     });
-    for (const row of previous.values()) rows.push(unknown(row, 'Watcher omitted a retained member; completion is unconfirmed'));
+    // A member already confirmed 'finished' is a terminal, settled fact; the
+    // watcher's reporting window can legitimately narrow to exclude a long-
+    // quiet session without that session's completion becoming any less
+    // true. Only non-terminal (still-open) omissions represent a genuine
+    // loss of tracking and need to be surfaced as unconfirmed. This trust
+    // only applies to continuous, already-healthy reporting: a baseline
+    // report (fresh connect, or recovering from unhealthy - e.g. right
+    // after a migration from a single-machine install) carries no live
+    // guarantee about rows it didn't just observe, so those must still
+    // surface as unconfirmed rather than silently resuming a stale dismissal.
+    let trackingLost = 0;
+    for (const row of previous.values()) {
+      if (!baseline && row.state === 'finished') { rows.push(row); continue; }
+      trackingLost++;
+      rows.push(unknown(row, 'Watcher omitted a retained member; completion is unconfirmed'));
+    }
     if (rows.length > 5000) throw fail('Retained member limit exceeded', 413);
     source.seq = value.seq;
     source.bodyHash = hash;
@@ -140,7 +155,7 @@ export class Collector {
     source.relatives = value.relatives;
     source.healthy = value.healthy && !skew;
     source.issues = [...value.issues, ...(skew ? ['Watcher clock differs by more than 30 seconds'] : []),
-      ...(previous.size ? ['Watcher omitted retained members; omitted states are unconfirmed'] : [])];
+      ...(trackingLost ? ['Watcher omitted retained members; omitted states are unconfirmed'] : [])];
     if (!source.healthy) { source.armed.clear(); source.activeRuns.clear(); }
     else for (const row of rows) {
       if (row.state === 'working' && row.completionTracked) source.activeRuns.set(row.id, row.runId);

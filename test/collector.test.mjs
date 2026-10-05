@@ -101,6 +101,23 @@ test('omissions, unsupported/unknown members, clock skew, reader failures and he
   }
 });
 
+test('a continuously healthy watcher narrowing its report window keeps a retained finished row trusted, but a fresh baseline still distrusts the same omission', async t => {
+  const f = await fixture(t);
+  await f.connect();
+  await f.report(0, [member('working', 'done')]);
+  await f.report(0, [member('finished', 'done')], { notices: [finishNotice('done')] });
+  assert.equal(f.alerts.length, 1, 'continuously observed completion is confirmed and notified');
+
+  await f.report(0, []);
+  assert.equal(f.collector.sources.get(f.identities[0].reporterId).members.find(row => row.id === 'done').state,
+    'finished', 'a healthy, already-baselined watcher narrowing its window keeps a retained finished row trusted');
+
+  await f.connect(0, now + 1);
+  await f.report(0, [], { now: now + 1 });
+  assert.equal(f.collector.sources.get(f.identities[0].reporterId).members.find(row => row.id === 'done').state,
+    'unknown', 'a fresh baseline (reconnect) cannot vouch for a retained row it did not just observe');
+});
+
 test('parent/descendant work restores dismissed families and stale dismiss revisions skip resumed state', async t => {
   for (const child of [false, true]) {
     const f = await fixture(t);
