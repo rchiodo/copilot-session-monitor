@@ -87,7 +87,10 @@ async function localPoll() {
   try {
     await actions.run(async () => {
       if (!localLease) {
-        await localObserver.monitor.update([], { healthy: false, reason: 'Collector connection changed; rebaselining' });
+        // See the matching comment in watcher.mjs: a dropped internal lease
+        // does not mean self-observation itself was interrupted, so this
+        // must not force-invalidate currently-tracked sessions. The
+        // collector already treats a reconnect as its own baseline.
         const connected = await collector.connect({ version: 1, reporterId: localReporterId, ...localIdentity });
         localLease = connected.lease;
         localSeq = 0;

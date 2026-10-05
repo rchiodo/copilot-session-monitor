@@ -97,10 +97,13 @@ async function poll() {
   if (polling || stopping || !reporter) return;
   polling = true;
   try {
-    if (!reporter.lease) {
-      await monitor.update([], { healthy: false, reason: 'Collector connection changed; rebaselining' });
-      await reporter.connect();
-    }
+    // Reconnecting after a dropped reporting lease does not mean local
+    // observation itself was interrupted, so this must not force-invalidate
+    // currently-tracked sessions (see pollLocal's own forcedGapReason for the
+    // legitimate "observation was actually interrupted" cases). The collector
+    // already treats a reconnect as its own baseline (collector.mjs) without
+    // needing the watcher to discard what it still knows locally.
+    if (!reporter.lease) await reporter.connect();
     notices = [];
     let forcedGapReason = null;
     if (reset) { forcedGapReason = reset; reset = null; }
