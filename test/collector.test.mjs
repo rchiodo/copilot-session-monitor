@@ -174,18 +174,42 @@ test('protocol rejects unsupported versions, unbounded or extra payloads and fal
   }
 });
 
-test('reconnect cannot upgrade work completed during a gap, even on repeated fresh snapshots', async t => {
+test('reconnect cannot upgrade work completed during a gap on the fresh baseline, but sustained corroboration recovers it', async t => {
   const f = await fixture(t);
   await f.connect(); await f.report(0, [member()]);
   await f.connect();
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < 2; i++) {
     await f.report(0, [member('finished')], { notices: [finishNotice()] });
-    assert.equal(f.collector.snapshot(now).sessions[0].state, 'unknown');
+    assert.equal(f.collector.snapshot(now).sessions[0].state, 'unknown',
+      'the baseline report and a single corroboration are not enough to re-trust a demoted row');
   }
+  await f.report(0, [member('finished')], { notices: [finishNotice()] });
+  assert.equal(f.collector.snapshot(now).sessions[0].state, 'finished',
+    'a run of consistent, healthy, non-skewed reports of the same run recovers it');
+  // No notification fires for the recovered row: it never re-armed through a fresh
+  // 'working' report after the reconnect, so this isn't treated as a brand-new completion.
   assert.equal(f.alerts.length, 0);
   await f.report(0, [{ ...member(), runId: 'new-run' }]);
   await f.report(0, [{ ...member('finished'), runId: 'new-run' }], { notices: [finishNotice()] });
   assert.equal(f.alerts.length, 1);
+});
+
+test('corroboration votes reset when the reported run changes or a report is unhealthy mid-sequence', async t => {
+  const f = await fixture(t);
+  await f.connect(); await f.report(0, [member()]);
+  await f.connect();
+  await f.report(0, [member('finished')], { notices: [finishNotice()] });
+  assert.equal(f.collector.snapshot(now).sessions[0].state, 'unknown');
+  // An unhealthy report in between doesn't accumulate toward recovery.
+  await f.report(0, [member('finished')], { healthy: false });
+  await f.report(0, [member('finished')], { notices: [finishNotice()] });
+  assert.equal(f.collector.snapshot(now).sessions[0].state, 'unknown',
+    'an intervening unhealthy report resets the corroboration count');
+  // A differing run also can't be stitched together with a prior vote.
+  await f.report(0, [{ ...member('finished'), runId: 'different-run' }], { notices: [finishNotice()] });
+  await f.report(0, [member('finished')], { notices: [finishNotice()] });
+  assert.equal(f.collector.snapshot(now).sessions[0].state, 'unknown',
+    'votes only stitch together across reports of the exact same run');
 });
 
 test('continuously tracked late final flush can finish, but lost authority cannot', async t => {

@@ -4,6 +4,13 @@ import { groupFamilies } from './families.mjs';
 import { sortSessions } from './engine.mjs';
 import { HEARTBEAT_MS, digest, fail, metadata, validateConnect, validateReport } from './protocol.mjs';
 
+// A row demoted to 'unknown' by a reconnect gap or an omission has no collector-side
+// proof of its own completion, but genuine corruption (vs. a merely untrusted gap)
+// looks identical for exactly one report. Requiring this many consecutive, healthy,
+// non-skewed reports of the very same run before re-trusting it keeps a single
+// baseline report untrusted (preserving the existing gap protection) while still
+// letting a session recover once the watcher keeps saying the same thing.
+const RECOVERY_VOTES_REQUIRED = 2;
 const namespace = (source, id) => `${source}~${id}`;
 const membership = family => family.members.map(row => row.id).sort().join('|');
 const unknown = (row, reason) => ({ ...row, state: 'unknown', finishedAt: null, completionTracked: false, detail: reason });
@@ -44,7 +51,7 @@ export class Collector {
           relatives: source.relatives, notices: [] });
         if (this.sources.has(source.id)) throw new Error('Duplicate stored reporter');
         this.sources.set(source.id, { ...source, lease: null, healthy: false, armed: new Map(), activeRuns: new Map(),
-          issues: ['Collector restarted; waiting for a fresh watcher baseline'] });
+          recoveryVotes: new Map(), issues: ['Collector restarted; waiting for a fresh watcher baseline'] });
       }
       for (const [id, key] of saved.dismissed) {
         if (typeof id !== 'string' || !/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid collector dismissal');
@@ -57,7 +64,8 @@ export class Collector {
       if (local && legacy.length) {
         this.sources.set(local.id, { id: local.id, label: local.label, installationId: null, generation: 0,
           bootId: null, lastSeen: null, ...metadata({ members: legacy }),
-          healthy: false, lease: null, armed: new Map(), activeRuns: new Map(), issues: ['Waiting for local watcher after migration'] });
+          healthy: false, lease: null, armed: new Map(), activeRuns: new Map(), recoveryVotes: new Map(),
+          issues: ['Waiting for local watcher after migration'] });
         for (const [id, key] of dismissed) this.dismissed.set(namespace(local.id, id), key);
       }
       await this.save();
@@ -91,7 +99,8 @@ export class Collector {
     source = { ...source, id: pairing.id, label: pairing.label, installationId: value.installationId,
       generation: value.generation, bootId: value.bootId, lease: randomBytes(32).toString('hex'),
       seq: 0, bodyHash: null, lastSeen: now, healthy: false, armed: new Map(), activeRuns: new Map(),
-      members: source?.members ?? [], relatives: source?.relatives ?? [], issues: ['Awaiting watcher baseline'] };
+      recoveryVotes: new Map(), members: source?.members ?? [], relatives: source?.relatives ?? [],
+      issues: ['Awaiting watcher baseline'] };
     const previous = this.sources.get(source.id);
     this.sources.set(source.id, source);
     try { await this.save(); }
@@ -126,10 +135,27 @@ export class Collector {
         saved.startedAt === row.startedAt && saved.finishedAt === row.finishedAt;
       const observedFinish = !baseline && value.healthy && !skew && source.activeRuns.get(row.id) === row.runId;
       const member = { ...row, firstObservedAt: saved?.firstObservedAt ?? row.firstObservedAt, lastAlert };
-      if (row.state === 'finished' && !retainedFinish && !observedFinish) {
-        return unknown(member, 'Completion occurred outside continuous collector observation; not confirmed');
+      if (row.state !== 'finished' || retainedFinish || observedFinish) {
+        source.recoveryVotes.delete(row.id);
+        return member;
       }
-      return member;
+      // Neither trust check can ever pass again for a row already demoted to
+      // 'unknown' by a prior gap or omission, since both require collector-side
+      // proof this specific run was seen live. Rather than trap it as unconfirmed
+      // forever, require a short run of continuous, healthy, non-skewed reports
+      // of this exact run (same id+runId+startedAt) before re-trusting it. A
+      // single corroborating report isn't enough (that's indistinguishable from
+      // the same stale gap report repeating), but a couple in a row is.
+      const corroborated = !baseline && value.healthy && !skew && saved?.state === 'unknown' &&
+        saved.runId === row.runId && saved.startedAt === row.startedAt;
+      if (!corroborated) { source.recoveryVotes.delete(row.id); }
+      else {
+        const vote = source.recoveryVotes.get(row.id);
+        const votes = (vote?.runId === row.runId && vote?.startedAt === row.startedAt ? vote.count : 0) + 1;
+        if (votes >= RECOVERY_VOTES_REQUIRED) { source.recoveryVotes.delete(row.id); return member; }
+        source.recoveryVotes.set(row.id, { runId: row.runId, startedAt: row.startedAt, count: votes });
+      }
+      return unknown(member, 'Completion occurred outside continuous collector observation; not confirmed');
     });
     // A member already confirmed 'finished' is a terminal, settled fact; the
     // watcher's reporting window can legitimately narrow to exclude a long-
@@ -156,7 +182,7 @@ export class Collector {
     source.healthy = value.healthy && !skew;
     source.issues = [...value.issues, ...(skew ? ['Watcher clock differs by more than 30 seconds'] : []),
       ...(trackingLost ? ['Watcher omitted retained members; omitted states are unconfirmed'] : [])];
-    if (!source.healthy) { source.armed.clear(); source.activeRuns.clear(); }
+    if (!source.healthy) { source.armed.clear(); source.activeRuns.clear(); source.recoveryVotes.clear(); }
     else for (const row of rows) {
       if (row.state === 'working' && row.completionTracked) source.activeRuns.set(row.id, row.runId);
       else if (!row.completionTracked) source.activeRuns.delete(row.id);
@@ -205,6 +231,7 @@ export class Collector {
     source.healthy = false;
     source.armed.clear();
     source.activeRuns.clear();
+    source.recoveryVotes.clear();
     source.issues = ['Watcher stopped or disconnected'];
     return { disconnected: true };
   }
@@ -217,7 +244,7 @@ export class Collector {
     }
     for (const source of this.sources.values()) {
       const online = this.live(source, now);
-      if (!online) { source.armed.clear(); source.activeRuns.clear(); }
+      if (!online) { source.armed.clear(); source.activeRuns.clear(); source.recoveryVotes.clear(); }
       const reason = !this.pairings.has(source.id) ? 'Reporter pairing revoked'
         : !source.healthy ? source.issues.join('; ') || 'Watcher unavailable'
           : 'Watcher heartbeat expired; source status is unconfirmed';
