@@ -34,7 +34,7 @@ const control = http.createServer((req, res) => {
     res.writeHead(403); return res.end('{}');
   }
   if (req.method === 'GET' && req.url === '/status') {
-    return res.end(JSON.stringify({ ...health, instanceId: identity.bootId, reporterId: pairing?.reporterId ?? null }));
+    return res.end(JSON.stringify({ ...health, instanceId: identity.bootId, reporterId: pairing?.reporterId ?? null, paired: Boolean(pairing) }));
   }
   if (req.method === 'POST' && req.url === '/connect' && req.headers.authorization === `Bearer ${controlToken}`) {
     let body = '';

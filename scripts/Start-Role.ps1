@@ -36,10 +36,15 @@ if (-not $runtime) {
 for ($i = 0; $i -lt 60; $i++) {
     $status = Invoke-RestMethod "$($runtime.url)$endpoint" -TimeoutSec 3
     if ($status.healthy) { break }
+    if ($Role -eq 'watcher' -and $status.paired -eq $false) { break }
     Start-Sleep -Milliseconds 500
 }
-if (-not $status.healthy) { throw "$Role is running but not healthy. Check .local\$Role-error.log and collector source coverage." }
 $stopScript = if ($Role -eq 'collector') { 'Stop-Host.ps1' } else { 'Stop-Client.ps1' }
+if ($Role -eq 'watcher' -and $status.paired -eq $false) {
+    Write-Host "watcher running, not yet paired. Use the tray icon's 'Connect to host...' menu to pair with a host. Stop with .\$stopScript."
+    return
+}
+if (-not $status.healthy) { throw "$Role is running but not healthy. Check .local\$Role-error.log and collector source coverage." }
 Write-Host "$Role running. Stop with .\$stopScript."
 if ($Role -eq 'collector') {
     Write-Host "Dashboard: $($runtime.url)"
