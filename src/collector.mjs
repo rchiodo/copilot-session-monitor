@@ -170,6 +170,22 @@ export class Collector {
     let trackingLost = 0;
     for (const row of previous.values()) {
       if (!baseline && row.state === 'finished') { rows.push(row); continue; }
+      // A row already demoted to 'unknown' by some earlier gap/omission has no path
+      // back to a trusted state through the recovery-votes mechanism above, since
+      // that requires the row to literally reappear in a future report - which a
+      // session the watcher has genuinely stopped tracking (old install, pruned
+      // retained store, etc.) never will. Its lastAlert is a separate, durable
+      // breadcrumb: it is only ever written once, by the engine's own state
+      // machine, at the exact moment a genuine completion was observed, and is
+      // never cleared by later demotions. Trusting it here - but only to rescue a
+      // row already sitting in 'unknown' - permanently resolves what would
+      // otherwise be a permanent "unconfirmed" zombie, without weakening the
+      // still-open ('working'/'waiting') case, which must keep surfacing as lost.
+      if (!baseline && row.state === 'unknown' && row.lastAlert?.kind === 'finished') {
+        rows.push({ ...row, state: 'finished', finishedAt: row.lastAlert.at,
+          completionTracked: false, detail: 'Current run finished; this is not task or PR success' });
+        continue;
+      }
       trackingLost++;
       rows.push(unknown(row, 'Watcher omitted a retained member; completion is unconfirmed'));
     }

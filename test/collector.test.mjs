@@ -118,6 +118,38 @@ test('a continuously healthy watcher narrowing its report window keeps a retaine
     'unknown', 'a fresh baseline (reconnect) cannot vouch for a retained row it did not just observe');
 });
 
+test('a row demoted to unknown by a reconnect omission is rescued back to finished once its lastAlert is trusted again, but a still-open row stays lost', async t => {
+  const f = await fixture(t);
+  const withAlert = row => ({ ...row,
+    lastAlert: { sessionId: row.id, key: `alert-${row.id}`, kind: 'finished',
+      message: 'Current run finished; this is not task or PR success', at } });
+  await f.connect();
+  await f.report(0, [member('working', 'done'), member('working', 'open')]);
+  await f.report(0, [withAlert(member('finished', 'done')), member('working', 'open')],
+    { notices: [finishNotice('done')] });
+
+  // A reconnect baseline that omits both rows demotes them identically to 'unknown', regardless
+  // of how each row's completion was previously observed.
+  await f.connect(0, now + 1);
+  await f.report(0, [], { now: now + 1 });
+  const bySourceId = id => f.collector.sources.get(f.identities[0].reporterId).members.find(row => row.id === id);
+  assert.equal(bySourceId('done').state, 'unknown');
+  assert.equal(bySourceId('open').state, 'unknown');
+
+  // A second, continuous (non-baseline) report that still omits both rows must only rescue the
+  // one with a durable, collector-corroborated finished lastAlert; the still-open row (never
+  // confirmed finished before vanishing) must keep surfacing as genuinely lost.
+  await f.report(0, [], { now: now + 2 });
+  assert.equal(bySourceId('done').state, 'finished', 'a prior confirmed finish is a durable fact even across a reconnect gap');
+  assert.equal(bySourceId('done').finishedAt, at);
+  assert.equal(bySourceId('done').completionTracked, false);
+  assert.equal(bySourceId('open').state, 'unknown', 'a row that vanished mid-run with no confirmed finish must stay unconfirmed');
+
+  const view = f.collector.snapshot(now + 2);
+  assert.equal(view.sessions.find(row => row.id.endsWith('~done')).state, 'finished',
+    'the rescued row no longer poisons its family with an unconfirmed state');
+});
+
 test('parent/descendant work restores dismissed families and stale dismiss revisions skip resumed state', async t => {
   for (const child of [false, true]) {
     const f = await fixture(t);
