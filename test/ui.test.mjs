@@ -328,7 +328,10 @@ test('machine labels and source coverage distinguish duplicate hostnames and sta
     machineTag: `Shared hostname (${id.slice(0, 8)})` }]);
   fixture.status.sources = [{ id, label: 'Shared hostname', healthy: true, lastSeen: timestamp, issues: [] }];
   await fixture.poll();
-  assert.match(part(fixture.nodes.get('running').children[0], 'row-title').textContent, /\[Shared hostname \/11111111\]/);
+  const card = fixture.nodes.get('running').children[0];
+  assert.equal(part(card, 'row-title').textContent, 'working session');
+  assert.match(part(card, 'row-title').title, /Shared hostname \(11111111\)/);
+  assert.match(part(card, 'muted').textContent, /Shared hostname \(11111111/);
   assert.match(fixture.nodes.get('source-summary').textContent, /^1\/1/);
   fixture.fail = true;
   await fixture.poll();

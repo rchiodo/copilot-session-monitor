@@ -97,6 +97,23 @@ test('detached servers and explicitly completed/stopped commands do not create f
   }
 });
 
+test('a sync command auto-moved to background by the runtime is tracked by its real shellId, not left unconfirmed', () => {
+  const { monitor } = rig();
+  const state = start();
+  state.accept(event('tool.execution_start', { toolName: 'powershell', toolCallId: 'moved', arguments: {} }));
+  state.accept(event('tool.execution_complete', { toolCallId: 'moved', success: true, result: { content:
+    '<command with shellId: 93 moved to background by the user. You will be automatically notified when it ' +
+    'completes. The user has already seen a UI confirmation — do NOT respond to them about this and do NOT ' +
+    "call any more tools for this command. Wait for the user's next instruction.>" } }));
+  final(state);
+  assert.equal(state.snapshot().backgroundCount, 1);
+  assert.equal(state.snapshot().backgroundUnconfirmed, false);
+  assert.equal(state.snapshot().terminal, null);
+  state.accept(event('system.notification', { kind: { type: 'shell_completed', shellId: '93', exitCode: 0 } }));
+  assert.equal(state.snapshot().backgroundCount, 0);
+  assert.ok(state.snapshot().terminal);
+});
+
 test('read return is not process exit; explicit native exit metadata settles an attached command', () => {
   const state = start(); launch(state); final(state);
   state.accept(event('tool.execution_start', { toolName: 'read_powershell', toolCallId: 'read', arguments: { shellId: 'shell-a' } }));

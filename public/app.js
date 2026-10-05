@@ -97,8 +97,7 @@ function row(item) {
     if (node.textContent !== value) node.textContent = value;
   };
   card.className = `card ${item.state}`;
-  const machineLabel = item.machineTag ? `[${item.machine.length > 16 ? `${item.machine.slice(0, 15)}...` : item.machine} /${item.reporterId.slice(0, 8)}] ` : '';
-  text(title, `${machineLabel}${item.title}`);
+  text(title, item.title);
   title.title = item.machineTag ? `${item.machineTag} | ${item.title}` : item.title;
   text(fullTitle, item.title);
   text(badge, `${stateLabel(item)}${item.members && item.state === 'working' && item.childCount

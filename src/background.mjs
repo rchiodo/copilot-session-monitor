@@ -10,6 +10,8 @@ function shellResult(data) {
   if (ended) return { id: ended[1], exitCode: Number(ended[2]) };
   const running = text.match(new RegExp(`(?:^|\\n)<command with shellId: (${shellId}) is still running after \\d+ seconds\\.[^<>]*>$`));
   if (running) return { id: running[1], running: true };
+  const moved = text.match(new RegExp(`(?:^|\\n)<command with shellId: (${shellId}) moved to background by the user\\.[^<>]*>$`));
+  if (moved) return { id: moved[1], running: true };
   const started = text.match(new RegExp(`^<command started in (detached )?background with shellId: (${shellId})>$`));
   if (started) return { id: started[2], running: true, detached: Boolean(started[1]) };
   const stopped = text.match(new RegExp(`^<command with id: (${shellId}) stopped>$`));
