@@ -74,6 +74,7 @@ createInterface({ input: bridge.stdout }).on('line', line => {
       reset = 'Windows process observation interrupted; rebaselining';
       processes = null;
     }
+    if (event.type === 'stop') void stop();
     if (event.type === 'connect') {
       void applyConnectionString(event.value).then(result => {
         if (bridge.stdin.writable) bridge.stdin.write(`${JSON.stringify({ type: 'connect-result', ok: true, ...result })}\n`);
