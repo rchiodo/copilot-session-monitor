@@ -15,6 +15,8 @@ function activity(events, owner) {
       foreground && current(events.lastExecutionAt)),
     activityUnconfirmed: events.backgroundUnconfirmed || background && !current(events.backgroundAt)
       ? 'Outstanding background work lacks confirmed current ownership or lifecycle evidence' : null,
+    completionUnconfirmed: events.terminal && !current(events.terminal.at)
+      ? 'Completion evidence predates the current process owner' : null,
   };
 }
 
@@ -151,6 +153,7 @@ export class LocalSource {
           sample.events = result.events;
           sample.busy ||= Boolean(result.busy);
           sample.activityUnconfirmed = result.activityUnconfirmed;
+          sample.completionUnconfirmed = result.completionUnconfirmed;
           if (sample.busy && (!sample.events.runId || sample.events.closed)) {
             issues.push(`${sample.title}: running flag lacks current execution evidence; not counted as working`);
           }

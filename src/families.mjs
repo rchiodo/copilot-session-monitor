@@ -137,14 +137,14 @@ export class FamilyMonitor {
       if (notices.length && (!wasBaseline || interrupted)) {
         const kind = ['error', 'waiting', 'warning'].find(kind => notices.some(event => event.kind === kind));
         const key = `family:${family.id}:${notices.map(event => event.key).sort().join('|')}`;
-        await this.emit(key, { kind, title: family.title,
+        await this.emit(key, { kind, familyId: family.id, title: family.title,
           message: `${notices.length} family member alert(s). ${notices.find(event => event.kind === kind).message}` });
       }
       if (!invalid && family.state === 'finished' && this.armed.has(family.id) && !wasBaseline) {
         const runs = family.members.filter(row => !row.contextOnly).map(row => [row.id, row.runId]).sort();
         const key = createHash('sha256').update(JSON.stringify(runs)).digest('hex');
         await this.emit(`family:${family.id}:${key}:finished`, {
-          kind: 'finished', title: family.title,
+          kind: 'finished', familyId: family.id, title: family.title,
           message: 'All observed family runs finished. This does not mean the entire task or PR succeeded.',
         });
         this.armed.delete(family.id);

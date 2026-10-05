@@ -84,7 +84,7 @@ async function page(sessions) {
   return fixture;
 }
 
-test('UI retains rows on disconnect but marks live/waiting states unconfirmed, then recovers', async () => {
+test('UI retains rows on disconnect but marks every completion unconfirmed, then recovers', async () => {
   const fixture = await page([session('finished'), session('working'), session('waiting')]);
   const { nodes, document } = fixture;
   assert.equal(nodes.get('running').children.length, 1);
@@ -97,7 +97,7 @@ test('UI retains rows on disconnect but marks live/waiting states unconfirmed, t
   assert.match(nodes.get('running-empty').textContent, /status unavailable/);
   assert.equal(nodes.get('retained').children.length, 3);
   assert.deepEqual(nodes.get('retained').children.map(badgeText),
-    ['Run finished', 'Unconfirmed', 'Unconfirmed']);
+    ['Unconfirmed', 'Unconfirmed', 'Unconfirmed']);
   assert.match(document.title, /unavailable/);
   assert.match(nodes.get('summary').textContent, /^0 working/);
   fixture.fail = false;
@@ -110,7 +110,7 @@ test('UI retains rows on disconnect but marks live/waiting states unconfirmed, t
   await fixture.poll();
   assert.equal(nodes.get('running').children.length, 0);
   assert.deepEqual(nodes.get('retained').children.map(badgeText),
-    ['Run finished', 'Unconfirmed', 'Unconfirmed']);
+    ['Unconfirmed', 'Unconfirmed', 'Unconfirmed']);
 });
 
 test('UI preserves server response ordering, explicit completion time, fallback and safe title rendering', async () => {
@@ -310,6 +310,20 @@ test('UI follows successive Windows app theme reports and explicitly falls back 
   fixture.fail = true;
   await fixture.poll();
   assert.equal(document.documentElement.dataset.theme, undefined);
+});
+
+test('machine labels and source coverage distinguish duplicate hostnames and stale collector connections', async () => {
+  const id = '11111111-1111-1111-1111-111111111111';
+  const fixture = await page([{ ...session('working'), machine: 'Shared hostname', reporterId: id,
+    machineTag: `Shared hostname (${id.slice(0, 8)})` }]);
+  fixture.status.sources = [{ id, label: 'Shared hostname', healthy: true, lastSeen: timestamp, issues: [] }];
+  await fixture.poll();
+  assert.match(part(fixture.nodes.get('running').children[0], 'row-title').textContent, /\[Shared hostname \/11111111\]/);
+  assert.match(fixture.nodes.get('source-summary').textContent, /^1\/1/);
+  fixture.fail = true;
+  await fixture.poll();
+  assert.match(fixture.nodes.get('source-summary').textContent, /^0\/1/);
+  assert.match(fixture.nodes.get('source-details').textContent, /UNAVAILABLE/);
 });
 
 test('light and dark palettes meet 4.5:1 contrast for text, controls, timestamps and every status', async () => {

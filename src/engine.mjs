@@ -23,14 +23,18 @@ export class Ledger {
   }
 
   claim(key) {
-    const result = this.writes.then(() => this.claimOnce(key));
+    return this.claimDigest(createHash('sha256').update(key).digest('hex'));
+  }
+
+  claimDigest(hash) {
+    if (!/^[a-f0-9]{64}$/.test(hash)) throw new TypeError('Invalid notification digest');
+    const result = this.writes.then(() => this.claimOnce(hash));
     // A failed write must reach its caller without poisoning subsequent writes.
     this.writes = result.then(() => undefined, () => undefined);
     return result;
   }
 
-  async claimOnce(key) {
-    const hash = createHash('sha256').update(key).digest('hex');
+  async claimOnce(hash) {
     if (this.keys.has(hash)) return false;
     const keys = [...this.keys, hash].slice(-4096);
     await mkdir(path.dirname(this.file), { recursive: true });
@@ -173,7 +177,7 @@ export class MonitorEngine {
     for (const sample of samples) {
       const { id, events: e } = sample;
       const busy = sample.busy || Boolean(e?.backgroundCount && !sample.activityUnconfirmed);
-      const unresolved = sample.activityUnconfirmed || e?.backgroundUnconfirmed;
+      const unresolved = sample.activityUnconfirmed || sample.completionUnconfirmed || e?.backgroundUnconfirmed;
       present.add(id);
       const previous = this.observed.get(id);
       let saved = this.rows.get(id);
@@ -211,7 +215,7 @@ export class MonitorEngine {
       };
       if (!sample.alive || !e || sample.readError || e.closed || e.replaced ||
           (unresolved && !busy) || (previous && previous.owner !== sample.owner)) {
-        await lose(sample.readError ?? sample.activityUnconfirmed ?? (unresolved
+        await lose(sample.readError ?? sample.activityUnconfirmed ?? sample.completionUnconfirmed ?? (unresolved
           ? 'Outstanding background work has unconfirmed status'
           : e?.replaced ? 'Event file rotated; rebaselining' : 'Session process unavailable or changed'));
         continue;

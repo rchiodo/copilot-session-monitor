@@ -36,6 +36,15 @@ const relatives = parents.flatMap((parent, index) => [
   { id: `missing-${index}`, parentId: `dormant-${index}`, title: 'Name unavailable (missing metadata)', detail: 'Metadata unavailable' },
 ]);
 const sessions = groupFamilies(members, relatives);
+const reporters = ['11111111-1111-1111-1111-111111111111', '22222222-2222-2222-2222-222222222222'];
+const machine = 'DUPLICATE-WINDOWS-HOST';
+function networkRows(rows) {
+  return rows.map(row => {
+    const reporterId = reporters[Number(row.id.split('-').at(-1)) % 2];
+    return { ...row, reporterId, machine, machineTag: `${machine} (${reporterId.slice(0, 8)})` };
+  });
+}
+const titleText = row => `[${machine.slice(0, 15)}... /${row.reporterId.slice(0, 8)}] ${row.title}`;
 const results = new Map();
 const contexts = new Map();
 function fixtureFor(request) {
@@ -52,7 +61,7 @@ function fixtureFor(request) {
   return contexts.get(id);
 }
 const expected = Object.fromEntries(['running', 'retained'].map(id =>
-  [id, sessions.filter(row => (row.state === 'working') === (id === 'running')).map(row => row.title)]));
+  [id, networkRows(sessions).filter(row => (row.state === 'working') === (id === 'running')).map(titleText)]));
 
 function measure() {
   const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -79,6 +88,8 @@ function measure() {
     check('noOverflow', within());
     check('counts', document.querySelector('#running-count').textContent === '12'
       && document.querySelector('#retained-count').textContent === '12');
+    check('sourceLabels', all('.row-title').every(node => /^\[DUPLICATE-WINDO.*\/(11111111|22222222)\]/.test(node.textContent))
+      && document.querySelector('#source-summary').textContent.startsWith('2/2'));
     for (const id of ['running', 'retained']) {
       const rows = all(`#${id} > .card`);
       metrics[id] = {
@@ -108,7 +119,7 @@ function measure() {
       && !all('.parent-alert').some(node => node.textContent.includes('CHILD ALERT MUST NOT REPLACE PARENT')));
     check('readableFonts', all('.row-title').every(node => parseFloat(getComputedStyle(node).fontSize) >= 14)
       && all('.compact-time').every(node => parseFloat(getComputedStyle(node).fontSize) >= 13));
-    const title = all('.row-title').find(node => node.textContent.startsWith('LongUnbroken'));
+    const title = all('.row-title').find(node => node.textContent.includes('LongUnbroken'));
     const card = title.closest('.card');
     const summary = card.querySelector('summary');
     const closedHeight = card.getBoundingClientRect().height;
@@ -117,7 +128,7 @@ function measure() {
     check('focusBeforePoll', document.activeElement === summary);
     summary.click();
     check('expands', card.open && card.getBoundingClientRect().height > closedHeight
-      && card.querySelector('.full-title').textContent === title.textContent
+      && title.textContent.endsWith(card.querySelector('.full-title').textContent)
       && card.querySelector('.full-title').getBoundingClientRect().height > 0
       && card.querySelector('.relatives').textContent.includes('Child: Child') && within());
     check('dormantNames', card.querySelector('.relatives').textContent.includes('Dormant full child name')
@@ -204,9 +215,11 @@ const server = http.createServer(async (request, response) => {
       response.end(JSON.stringify([...results.values()]));
     } else if (url.pathname === '/api/status') {
       const { monitor, mode } = fixtureFor(request);
+      const snapshot = monitor.snapshot();
       response.setHeader('Content-Type', 'application/json');
       response.end(JSON.stringify({
-        ...monitor.snapshot(), healthy: true, issues: [], coverage: 'SYNTHETIC FIXTURE - this machine only',
+        ...snapshot, sessions: networkRows(snapshot.sessions), healthy: true, issues: [], coverage: 'SYNTHETIC FIXTURE - paired sources',
+        sources: reporters.map(id => ({ id, label: machine, healthy: true, lastSeen: timestamp, issues: [] })),
         machine: 'TEST-MACHINE', updatedAt: timestamp, notification: { message: 'Fixture: notifications not connected' },
         theme: { mode, source: 'windows-apps' },
       }));

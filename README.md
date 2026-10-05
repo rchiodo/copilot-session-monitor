@@ -1,22 +1,35 @@
-# Local Copilot session monitor
+# Copilot session monitor for Windows
 
-A standalone Windows tray app and local web page for watching Copilot sessions. See which observed session families are working, keep finished entries until you dismiss them, and receive native notifications when an observed family's current runs finish.
+A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and receives native notifications. Every source PC, including the collector PC when desired, runs its own watcher.
 
-The monitor runs independently of your Copilot chats and browser tabs. It has no npm dependencies, cloud service, or installer. **Coverage is this Windows machine only.** This is an unofficial, version-sensitive prototype, not an official Copilot live-status API.
+The multi-machine changes are currently a working-tree implementation; use this same version on every PC. A previously published version may support only one machine. There are no npm dependencies, cloud relay, accounts, service installation, or automatic startup registration.
+
+## Components
+
+```mermaid
+flowchart LR
+    A["PC A: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C["Collector on PC A"]
+    B["PC B: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C
+    D["PC C: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C
+    C --> W["Loopback webpage on PC A"]
+    C --> N["Windows notifications on PC A"]
+```
+
+- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage or completion-notification tray, and needs no chat/model running. It does show a small tray icon with a **"Connect to host..."** menu for pairing (see below).
+- **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the notification tray — including a **"Generate connection request for a sub machine..."** menu item for pairing new watchers. It never opens a remote Copilot database or filesystem.
+- These are **two logical roles**, not a promise of two OS PIDs. Each Node process has a Windows PowerShell helper that also renders that role's tray icon and menu. The watcher's helper supplies process/power evidence and the pairing dialog; the collector's helper supplies Windows theme, power events, notifications, and the connection-string generator.
 
 ## Requirements
 
-- Windows with an interactive desktop and Windows PowerShell.
-- [Node.js](https://nodejs.org/) **24 or newer**, available on `PATH`.
-- A local Copilot desktop installation that writes the supported metadata and event files under `%USERPROFILE%\.copilot`. The adapter was verified against desktop 1.1.24 / CLI 1.0.90-0; other versions may change the format.
-- A current Edge or Chromium browser with CSS `light-dark()` support.
-- Git if cloning the repository rather than downloading its source.
+- Windows 10/11 with Windows PowerShell and a current .NET Framework; the collector needs an interactive Windows desktop for tray notifications.
+- [Node.js](https://nodejs.org/) **24 or newer**, on `PATH`. **No `npm install` is needed.**
+- Each watcher needs a supported local Copilot installation writing `%USERPROFILE%\.copilot`. The source adapter was verified against desktop 1.1.24 / CLI 1.0.90-0 and is undocumented/version-sensitive.
+- A current Edge/Chromium browser on the collector PC.
+- For multiple PCs: an existing LAN/private VPN route and permission to receive TCP on the selected collector interface/ingestion port. This app does not set up a VPN or change firewall rules.
 
-There is **no `npm install` step**. The app uses Node.js built-in modules and Windows components.
+## One-machine quick start
 
-## Quick start
-
-Run these commands in PowerShell from a directory where you keep projects:
+Obtain the source, then run in PowerShell from its directory:
 
 ```powershell
 git clone https://github.com/rchiodo/copilot-session-monitor.git
@@ -24,146 +37,198 @@ cd .\copilot-session-monitor
 .\Start-Monitor.ps1
 ```
 
-Open **http://127.0.0.1:43187**. The start script launches a separate background Node process, waits for observation to become healthy, and opens the browser. Running the script again finds the existing monitor instead of starting another copy.
+For unreleased changes, copy the working source to another PC **without `.local`, `.git`, or generated evidence** rather than assuming GitHub already contains those changes.
 
-To start without opening a browser:
+`Start-Monitor.ps1` prepares an app-local certificate and local watcher pairing, then starts an independent collector and watcher. The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
 
 ```powershell
 .\Start-Monitor.ps1 -NoBrowser
-```
-
-The Windows tray icon provides **Open observed sessions**, **Test notification**, and **Stop monitor**. Closing the browser or terminal does not stop the background monitor. The tray icon may be in the notification area's overflow menu.
-
-To stop it, use the tray menu or run this from the cloned directory:
-
-```powershell
 .\Stop-Monitor.ps1
 ```
 
-Stopping the monitor does not stop, resume, or modify any Copilot session. No Windows startup registration is installed; start it again after signing in or rebooting.
+Closing the browser, terminal, or Copilot chat does not stop either role. Start again after signing in/rebooting. `Stop-Monitor.ps1` stops both roles belonging to this checkout, never Copilot sessions.
 
-If PowerShell blocks an unsigned local script and your organization's policy permits a one-process override:
+An existing one-machine installation must be stopped before its first split-mode start. Migration makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's session and notification stores, preserves first-observed times/dismissal revisions/dedupe, and namespaces records under its new stable local reporter identity. Original legacy files remain untouched. No Copilot data is migrated or changed.
+
+## Multiple-machine setup
+
+Use the same source version on each PC. Choose **one collector PC** with a stable private IP reachable through your LAN or existing VPN. The IP below is a synthetic example; replace it with an assigned IP on that PC. Wildcard/public binds are rejected.
+
+### Recommended: tray + clipboard connection string
+
+This is a Live-Share-style pairing flow: generate a one-time connection string on the collector PC, copy it to the clipboard, and paste it into the watcher's tray dialog on the other PC. There is no separate file to transfer.
+
+**On the collector PC**, stop the local roles, opt into a private interface, then start the tray app in host mode:
+
+```powershell
+.\Stop-Monitor.ps1
+.\Initialize-Collector.ps1 -BindAddress 192.168.1.20 -IngestPort 43188 -Reconfigure
+.\Start-Tray.ps1 /host
+```
+
+This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
+
+Right-click the collector's tray icon and choose **"Generate connection request for a sub machine..."**. Optionally type a label to identify the source PC (e.g. "Development laptop"), then OK. A connection string — prefixed `csm1:` — is copied to the clipboard and a confirmation toast appears. The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
+
+**On each remote Windows PC**, with the source checked out, start the tray app in its default child/watcher mode:
+
+```powershell
+.\Start-Tray.ps1
+```
+
+Right-click its tray icon, choose **"Connect to host..."**, paste the connection string into the dialog, and click OK. The watcher validates the string (rejecting malformed or wrong-version input with a clear error dialog instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. A confirmation toast shows the host address and reporter label.
+
+Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Native notifications appear **only on the collector PC**. To stop that source watcher, use its tray icon's **"Stop watcher"** item or:
+
+```powershell
+.\Stop-Watcher.ps1
+```
+
+No remote production connectivity is assumed just because local tests pass. After pairing a second physical PC, verify its Connected status and a naturally occurring run/finish in the collector. Nothing here drives existing Copilot work to manufacture a result.
+
+### Alternative: file-based pairing (scripted/headless setups)
+
+`New-Reporter.ps1` / `Import-Reporter.ps1` remain available for scripted or headless setups where copying a clipboard string between two interactive desktop sessions isn't practical. They use the same underlying credential/certificate logic as the tray flow above — just packaged as a file instead of a clipboard string.
+
+**On the collector PC**, after `Initialize-Collector.ps1` and starting the collector (`Start-Collector.ps1` or `Start-Tray.ps1 /host`):
+
+```powershell
+.\New-Reporter.ps1 -Name 'Development laptop'
+```
+
+This creates a unique reporter ID and write-only credential, prints a **private pairing-file path under `.local`**, and prints the public certificate SHA256 fingerprint. Transfer that pairing file privately to the intended Windows PC, such as through an approved private channel or encrypted removable media. The file contains a bearer credential and the collector certificate. Do not paste it into chat, a URL, process arguments, browser storage, source control, or logs. Do not transfer the entire `.local` directory.
+
+**On each remote Windows PC**, with the transferred private file at a path you choose:
+
+```powershell
+.\Import-Reporter.ps1 -PairingFile 'C:\PrivateTransfer\pairing-example.json'
+.\Start-Watcher.ps1
+```
+
+Compare the import's printed certificate fingerprint with the collector's fingerprint through your trusted transfer channel. The importer stores the profile under `.local`; keep any transfer copy private and remove it yourself when no longer needed. From here, behavior (connect/baseline/heartbeat/coverage/stop) is identical to the tray flow above.
+
+### Collector-only and watcher-only operation
+
+| Command | Role |
+| --- | --- |
+| `.\Start-Tray.ps1 /host` | Recommended host entry point: identical to `Start-Collector.ps1`, with a tray icon offering "Generate connection request...". |
+| `.\Start-Tray.ps1` (no args) | Recommended child entry point: identical to `Start-Watcher.ps1`, with a tray icon offering "Connect to host...". |
+| `.\Initialize-Collector.ps1` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
+| `.\Start-Collector.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
+| `.\Stop-Collector.ps1` | Stop only the collector; watchers will report unavailable and retry. |
+| `.\Start-Watcher.ps1` / `.\Stop-Watcher.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
+| `.\Start-Monitor.ps1` / `.\Stop-Monitor.ps1` | Easy local collector + watcher orchestration. |
+
+The tray and webpage **Stop collector** control stops only the collector. Use `Stop-Monitor.ps1` to stop both local roles. Do not point one checkout's watcher at multiple collectors.
+
+For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
+
+If local PowerShell script policy blocks execution and your organization's policy permits a one-process override:
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Monitor.ps1
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Stop-Monitor.ps1
 ```
 
-These commands do not change saved execution policy. Do not bypass an organization's enforced policy.
+This does not change saved execution policy. Do not bypass an organization's enforced policy.
 
-For foreground operation, use `npm start` and stop with Ctrl+C. To use another port, stop the existing monitor, set `$env:MONITOR_PORT = '43188'`, then start it again. The start script prints the actual URL. Run only one instance per checkout.
+## Trust, credentials, and network boundaries
 
-## Using the monitor
+- HTTPS is mandatory for reports, including local reports. The app creates a self-signed certificate **in memory**, stores the PFX only under `.local`, and never installs it into a Windows trust store.
+- A watcher explicitly trusts only its imported collector certificate for this connection, with normal certificate expiry and IP/SAN verification. There is no global TLS bypass or plaintext-LAN-token mode.
+- Setup restricts this app's private `.local` directory ACL to the current Windows user and SYSTEM. This affects only monitor files, not global Windows policy. Credentials/private keys are not encrypted against programs already running as your user.
+- Each credential can connect/report/disconnect **only its own reporter identity**. It cannot read other reporters, change collector configuration, dismiss cards, stop the collector, or access browser controls.
+- First connection binds the pairing to the watcher's durable installation identity. Competing boots and copied pairings cannot silently replace a live source. Never copy a watcher's full `.local` directory to another PC; reusing its complete private identity is outside this trust boundary.
+- The collector allows only a user-selected assigned private/loopback interface. No automatic firewall, certificate-store, OS startup, or VPN changes are made. If inbound traffic is blocked, obtain approval and configure the specific private-network rule yourself.
 
-| UI element | Meaning |
+To revoke a remote credential on the collector, use its reporter ID from the private pairing file or dashboard details:
+
+```powershell
+node .\src\configuration.mjs revoke REPORTER-ID
+```
+
+Revocation preserves retained metadata but makes that source unavailable. It does not delete Copilot work. To rotate the certificate or change the listening IP, stop the collector and use `Initialize-Collector.ps1 ... -Reconfigure`. The local profile and retained exported pairing files are updated. Stop remote watchers and re-import their updated **same-identity** pairing files through the trusted channel before restarting. Certificates expire after two years; they are not silently renewed or trusted. Keep private pairing/identity backups; a new pairing is a distinct source, not a hostname-based merge.
+
+## Reading the dashboard
+
+Two compact columns show **Running** and **Finished / Needs input**. The latter also contains distinct **Error**, **Interrupted**, and **Unconfirmed** states; placement alone is not proof of completion.
+
+Each card is one canonical parent plus linked descendants **on that source**. A working parent or any observed descendant keeps the family Working, including attached PowerShell commands or task agents after the foreground model stops. Stable reporter IDs namespace every session/family ID, so copied session IDs and duplicate hostnames never merge. Cross-machine parent links are not guessed.
+
+Cards show a source label/short identity, readable title, state, and the parent's own latest monitor alert/time. A child alert never replaces the parent's alert; a parent's Finished alert may coexist with family Working. No assistant-response preview is sent or displayed.
+
+Expand a card for full titles, all known linked descendants, nested status, machine identity, parent alert, and timestamps. Dormant children are **Not observed**, not assumed idle or finished. Details and keyboard focus survive normal refresh/reordering.
+
+Each column sorts by the parent's latest assistant-response timestamp, with labeled first-observed fallback. Source timestamps remain source timestamps, not invented collector response times. Keep Windows clocks synchronized; reports over 30 seconds out of sync or containing future lifecycle times are unconfirmed. Dates render in the dashboard browser's time zone.
+
+Collapsed rows are approximately 56px on desktop, with about ten visible at a 1200x900 CSS-pixel viewport. Columns stack at widths of 900px or less. Expanded/narrow rows may be taller. Light/dark appearance follows the **collector PC's** Windows app preference (`AppsUseLightTheme`), including live changes; the UI explicitly labels browser-theme fallback.
+
+### Dismissal and notifications
+
+**Dismiss** and **Clear finished** remove only safely finished entries from this monitor's visible list, never Copilot sessions/files/history/worktrees. Working, waiting, error, offline, and unconfirmed families cannot be dismissed.
+
+The collector checks current report freshness and completed-run revision on each action; stale revisions are skipped. New parent/descendant work restores the family on the next report. Network delay means a source change is not instantaneous at the collector, but a dismissal cannot permanently hide subsequently reported new work. Dismissal survives restart. During source uncertainty a previously dismissed card may reappear as Unconfirmed; unchanged safely revalidated finishes remain dismissed.
+
+Completion alerts mean **the observed current family runs finished**, not that a task, tests, or PR succeeded. The collector requires continuous same-lease observation, working-run evidence, safe member states, and an explicit family finish notice. A silently omitted member, cleared foreground flag, or lack of output cannot finish a family.
+
+Use **Test notification** in the collector page/tray to check native delivery. Windows Focus / Do not disturb and notification policy can suppress tray balloons. Even Windows reporting "shown" is not proof that you saw a banner. The app never changes notification settings.
+
+## Protocol and failure behavior
+
+The ingestion listener exposes only authenticated `POST /v1/connect`, `/v1/report`, and `/v1/disconnect`. JSON protocol version 1 is bounded to 4 MiB/report, 5,000 retained members and 5,000 related names per source, 100 issues, and 100 paired sources. Extra/invalid fields, oversized bodies, and unsupported versions are rejected rather than truncated into false success.
+
+Each watcher has a durable installation ID, increasing boot generation, fresh boot ID, collector-issued lease, and increasing sequence. Exact duplicate reports are acknowledged without replay; reordered/conflicting reports and old leases are rejected. A newer boot cannot seize an active lease. A crash may require waiting for the 15-second lease to expire.
+
+Watchers normally report about every 1.5 seconds. Missing heartbeats for 15 seconds, disconnection, clock skew, unavailable readers/owners, unsupported evidence, and collector restart make affected families Unconfirmed and non-dismissable. Other connected machines remain visible as working. Source coverage lists paired-but-never-connected and revoked/offline sources rather than implying all machines are idle.
+
+Reconnect starts a fresh baseline and drops completion authority across the gap. Work that finished while the collector could not continuously observe it is not retroactively promoted to confirmed completion. Previously confirmed unchanged finishes can be restored, but old alerts do not replay. Notification dedupe is durable and **at-most-once**: a crash between persistence and delivery may lose an alert rather than duplicate it.
+
+The watcher retains the existing conservative lifecycle reducer. Same-run terminal evidence, unchanged live owners, and settled attached background work are necessary for completion. Explicitly detached services do not hold a run open. Waiting/input/approval, errors, missing exits, cancellation, partial JSONL, rotation, sleep, and unsupported forms are not successful completion.
+
+## Sources, privacy, and limits
+
+Each watcher opens its own `%USERPROFILE%\.copilot\data.db` read-only and incrementally reads its own `session-state\<id>\events.jsonl`. It uses canonical workspace/runtime aliases, parent links, chat creator/side-chat metadata, `inuse.<pid>.lock`, process ancestry, and creation times. The persisted `is_running` flag alone is **not** reliable full-session activity.
+
+No session UI scraping, authenticated cloud endpoints, Copilot authentication tokens, automatic prompts, resume/abort, or Copilot settings/database writes are used. See [GitHub's session data documentation](https://docs.github.com/en/copilot/concepts/security-governance-and-network-settings/session-data); the schemas/status envelopes used here remain unofficial/version-sensitive.
+
+Raw event bytes are read temporarily on the source to derive state. Only bounded lifecycle metadata leaves it: session IDs/titles, source identity, hierarchy, statuses, timestamps, and monitor alerts. No raw prompts, response text, commands, tool outputs, file contents, or executable instructions are transmitted.
+
+Private files remain under Git-ignored **`.local\`**:
+
+| Files | Purpose |
 | --- | --- |
-| **Running** column | A parent or at least one observed descendant has current execution evidence. Attached background commands can keep a family Working after the foreground model stops. |
-| **Finished / Needs input** column | Retained non-running families, with distinct finished, input/approval, error/interrupted, and **Unconfirmed** labels. Being in this column alone does not mean finished. |
-| **Run finished** | The monitor observed the current runs finishing. This is **not** a claim that the whole task, tests, or pull request succeeded. The observed completion time is displayed explicitly. |
-| **Parent alert** | The parent's own latest observed monitor alert and its time, independent of aggregate family status. A child alert never replaces it. **No parent alert observed** means none was recorded, not that an old alert was reconstructed. |
-| **Working 1/3** | One of three retained family members is working. Dormant children listed only as metadata are not included in the working count. |
-| **Not observed** | A linked child's name is known, but this monitor has not observed its execution. It is not assumed idle or finished. |
+| `collector.json`, `collector.pfx`, `collector-cert.pem`, `pairing-*.json` | Collector identity, reporter credential hashes, TLS material, private transfer bundles. |
+| `collector-state.json`, `notifications.json` | Central retained source/family metadata, first-seen times, dismissals, and notification dedupe. |
+| `watcher.json`, `watcher-identity.json`, `watcher-sessions.json` | Private pairing/credential, stable installation/generation, local metadata-only observation cache. |
+| `runtime.json`, `watcher-runtime.json`, `*.lock`, `*-error.log`, `*.log` | Local process/control identity and diagnostics. No reporter credentials are placed in normal logs. |
+| `backup-*`, legacy `sessions.json` | Preserved one-machine migration state. |
 
-One compact card represents a top-level parent and its linked descendants. Standalone sessions have one card each. Canonical app records determine relationships; names, repositories, and working directories do not.
+Do not publish these files, real Copilot databases/events, screenshots, or diagnostic snapshots. Dismissal hides cards but does not erase internal metadata. Other programs running as your Windows user can access local controls; this is not a hostile multi-user or public-Internet service. An authorized/compromised watcher can report false metadata **for its own identity**; the collector is not a remote attestation system.
 
-Click a card's disclosure, or focus it with Tab and press Enter/Space, to expand the full parent and child names, nested relationships, member statuses, machine/source, response time, and completion/alert details. Long names wrap in the details. Disclosure and focus are preserved through normal polling and reordering.
-
-Each column sorts by the **parent's latest assistant response timestamp**, not tool activity or polling time. If no response time is available, a labeled, stable first-observed time is used. Dates use your browser's local time zone.
-
-Rows are compact by default: approximately 56px on desktop, with about ten visible per column at a 1200x900 CSS-pixel viewport. Expanded details and narrow screens can be taller. At widths of 900px or less, the columns stack without horizontal overflow.
-
-The app follows the Windows user's **app light/dark preference**, including changes while running. It reads `AppsUseLightTheme` without changing it. If Windows preference reading is unavailable, the UI labels its browser-theme fallback.
-
-### Dismiss finished entries
-
-**Dismiss** hides one safely finished family; **Clear finished** hides the visible qualifying finished families. These controls affect **only this monitor's list**. They do not delete Copilot sessions, files, history, worktrees, source-database rows, or Windows notifications.
-
-Working, waiting, error, and unconfirmed families cannot be dismissed. The server refreshes source state and checks each completion revision before accepting an action, so stale controls cannot hide resumed work. Bulk actions report skipped entries.
-
-Dismissal survives browser refresh and monitor restart without resetting observation or notification dedupe. New observed work by the parent or any descendant restores the family. Changed membership or uncertain state can also make a card visible conservatively. There is no automatic expiration or trash folder.
-
-### Check native notifications
-
-Select **Test notification** on the page or tray menu. It sends a clearly labeled test through the same Windows notification mechanism, independent of Copilot and browser notification permissions.
-
-Windows **Focus / Do not disturb**, notification policy, or other Windows settings can suppress tray balloons. The page distinguishes queued, submitted, and Windows-reported shown; even "shown" is not proof that you personally saw a banner. The monitor does not change notification settings.
-
-Completion alerts are grouped by family: a parent's run ending does not announce family completion while another observed member still works. Input, error, and unavailable-status alerts are distinct from successful completion.
-
-## How observation works
-
-The app opens `%USERPROFILE%\.copilot\data.db` read-only and reads named session/hierarchy metadata fields. It incrementally reduces `%USERPROFILE%\.copilot\session-state\<id>\events.jsonl` into lifecycle metadata. Live owners are matched through `inuse.<pid>.lock`, Windows process identity, and process creation times. Desktop owners must have a live Copilot desktop parent process.
-
-Hierarchy resolution uses `workspaces.session_id`, `workspace_parent_links`, `workspace_session_aliases`, chat creator links, and recorded side-chat links. Older runtime IDs are resolved without importing unrelated historical sessions.
-
-**The persisted `is_running` flag is not full-session activity.** A foreground model loop can stop while attached PowerShell commands or task agents remain running. The monitor independently discovers live local owners and tracks supported background-work lifecycle evidence. A tool call returning does not mean its command exited. Explicitly detached services do not hold a run open.
-
-An observed desktop completion requires same-run terminal evidence, a cleared foreground flag, no outstanding or unconfirmed supported background work, continuous healthy observation, and a live unchanged owner. Unsupported shell-status formats, missing exits, failures, cancellation, input gates, and observation gaps do not establish success.
-
-The monitor never resumes, aborts, sends prompts to, or modifies Copilot sessions to discover state. It does not scrape Copilot UI, connect to authenticated cloud endpoints, read Copilot authentication tokens, or rely on an AI chat polling status tools.
-
-See [GitHub's session data documentation](https://docs.github.com/en/copilot/concepts/security-governance-and-network-settings/session-data). The database schema and runtime status envelopes used here remain **undocumented/version-sensitive implementation details**.
-
-## Reliability and limitations
-
-- **Local Windows only.** Other machines, remote hosts, and cloud execution are not monitored. A known active nonlocal relative can appear as an unavailable completion blocker, not as verified remote activity.
-- **Standalone CLI is activity-only.** Supported live root turns can appear, but full CLI-run completion notifications are deliberately unsupported. The SDK's true `session.idle` and `assistant.idle` signals are ephemeral, not recoverable from JSONL. Unsupported background-work mechanisms may require a future public standalone status interface.
-- Startup and reconnect baseline existing state. Old finished runs do not trigger a notification storm. Runs that finish while the monitor is stopped or disconnected are not retroactively declared successful.
-- Polling is approximately every 1.5 seconds, with process snapshots every 2 seconds and CLI directory discovery every 5 seconds. Short transitions entirely between observations can be missed. Silence, file age, and process existence alone are not proof of completion.
-- Sleep, clock rollback, polling gaps over 15 seconds, dead/replaced owners, event rotation, malformed data, or reader failures discard completion authority. UI snapshots older than 10 seconds are unavailable rather than falsely healthy.
-- A final marker already present when observation begins cannot confirm a later finish by itself. Unsupported final-response shapes remain unconfirmed. Partial JSONL writes wait for a complete line; malformed or oversized records fail closed.
-- Missing parents, ambiguous identities, conflicting links, and hierarchy cycles block family completion. Dormant linked names are metadata, not proof of observed work.
-- Native input gates that were never persisted and internal deadlocks may not be observable. The monitor cannot promise exact full-session completion for every runtime/version.
-- Notifications are at-most-once: dedupe is saved before delivery, so a crash can lose an alert rather than replay it.
-
-## Local storage and privacy
-
-All runtime data is kept under **`.local\` in your checkout**, which is excluded from Git:
-
-| File | Contents |
-| --- | --- |
-| `sessions.json` | Retained metadata: session IDs/titles, machine/source, relationships, states, timestamps, parent alerts, and dismissed-run hashes. |
-| `notifications.json` | Hashed notification dedupe keys. |
-| `runtime.json` | This monitor's PID, instance identity, loopback URL, and control token. Treat this file as private. |
-| `monitor.log`, `monitor-error.log` | Start-script process output and diagnostics. |
-
-Retained metadata accumulates locally; dismissal hides cards but does not erase internal observations. Do not publish `.local`, Copilot databases/event files, screenshots, or diagnostic snapshots.
-
-Transcript text, commands, prompts, and tool output are not displayed or retained by the monitor. Raw event bytes are temporarily read to extract lifecycle facts; only required metadata is kept. Source databases/settings are never modified.
-
-The server binds only to **127.0.0.1**, makes no external network requests, and uses Host/Origin checks and a control token for mutations. Other programs running as your Windows user can access the local UI. This is not an authenticated multi-user service.
+Standalone CLI coverage is **activity-only**, without full-run completion notifications. SDK `session.idle`/`assistant.idle` signals are ephemeral, not recoverable from JSONL. Short transitions entirely between observations, hidden input gates, internal deadlocks, remote/cloud work lacking a paired Windows source, and unsupported background mechanisms remain limitations. No unrelated idle archive is imported.
 
 ## Troubleshooting
 
-- **Start fails:** check `node --version`, the PowerShell error, and `.local\monitor-error.log`. A missing or incompatible Copilot database is an observation error, not an empty successful result.
-- **No cards:** idle historical sessions are deliberately not imported. Let normal Copilot work run; do not treat an empty list as proof that unsupported remote work is idle.
-- **Unconfirmed:** expand the card and check the health message. Restore the missing source or restart the monitor after an app update; do not treat an uncertain state as completion.
-- **Port already in use:** stop the existing monitor or select another `MONITOR_PORT`. Do not delete runtime files belonging to a still-running instance.
-- **No notification banner:** use Test notification and check Windows notification policy yourself.
+- **Start fails:** check `node --version` and the relevant `.local\collector-error.log` or `watcher-error.log`. Configuration must precede collector-only startup; pairing must precede watcher-only startup.
+- **Watcher unavailable:** expand source coverage. Verify collector is running, route/private IP/port are correct, and any approved firewall rule permits that specific interface. The web URL is not the HTTPS ingestion URL.
+- **TLS/auth error:** compare certificate fingerprints, expiry, IP/SAN, system clocks, and imported pairing. Re-import the correct bundle; do not disable TLS verification. A revoked credential requires an explicitly authorized pairing.
+- **Identity conflict:** do not copy private installation files or run two watchers from the same identity. Stop the prior instance or wait for lease expiry after a crash; use a unique pairing for each machine.
+- **Collector not healthy after restart:** if a stale runtime/lock refers to a reused PID, verify the old monitor is gone before removing those specific monitor files. Never kill Copilot processes or delete all `.local` data.
+- **No cards:** old idle archive entries are intentionally absent. Empty lists are not proof that an unpaired or unsupported machine is idle.
+- **Unconfirmed:** inspect source/member reasons. Restore observation and allow a new naturally occurring run; do not interpret uncertainty as completion.
+- **Port conflict:** stop this installation's existing roles or choose separate free dashboard/ingestion ports.
 
-## Development and tests
-
-No dependency installation is required:
+## Development and verification
 
 ```powershell
 npm test
-```
-
-For targeted lifecycle, discovery, family, and dismissal checks:
-
-```powershell
-node --disable-warning=ExperimentalWarning --test .\test\background.test.mjs .\test\source.test.mjs .\test\families.test.mjs .\test\dismiss.test.mjs
-```
-
-Tests use synthetic metadata and temporary directories, not your real Copilot sessions. The Windows HTTP integration test starts a separate copied server/tray helper with an empty synthetic Copilot home and tests authorization, dismissal, and restart. It never sends dismissal requests to your production monitor.
-
-For browser layout checks:
-
-```powershell
+node --disable-warning=ExperimentalWarning --test .\test\collector.test.mjs .\test\controls.test.mjs .\test\background.test.mjs .\test\source.test.mjs
 node .\scripts\verify-ui.mjs
+node .\scripts\check-ui.mjs
 ```
 
-Open the printed fixture URL in Edge. This separate loopback harness serves synthetic families using the real UI assets, checking both themes, compactness, long names, disclosure/focus, finished-only dismissal, and wide/narrow layouts. It never reads Copilot data or connects to the production monitor. Results are shown on the page and at its `/results` endpoint. Stop the fixture server with Ctrl+C.
+Tests use synthetic metadata and owned temporary directories. The Windows integration test creates app-local test certificates, launches a real HTTPS collector, two independent reporter transport processes with colliding session IDs/hostnames, and the full watcher executable against an empty synthetic Copilot home. It exercises TLS/auth/schema/size rejection, namespace isolation, notifications, dismissal/resume, heartbeat loss, migration, restart, and dedupe. It never dismisses production records.
+
+The separate browser fixture harness prints a loopback URL and checks both themes, compactness, long names, source labels, disclosure/focus, and wide/narrow layouts using real UI assets. It never reads Copilot data. Results appear on the page and `/results`; stop it with Ctrl+C. `check-ui.mjs` automates the harness using an installed, isolated headless Edge instance and cleans up its own profile/processes. Add `--live` only to also inspect the local collector's rendering read-only. Loopback process tests are not proof of a physical second machine's VPN/firewall setup.
 
 ## License
 

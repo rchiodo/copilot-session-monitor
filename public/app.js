@@ -32,8 +32,8 @@ function applyTheme(theme) {
 
 function unavailable(rows, reason) {
   return rows.map(item => {
-    const result = ['working', 'waiting', 'idle'].includes(item.state)
-      ? { ...item, state: 'unknown', detail: reason, finishedAt: null } : { ...item };
+    const result = item.state !== 'unobserved'
+      ? { ...item, state: 'unknown', detail: reason, finishedAt: null, dismissKey: null } : { ...item };
     if (item.members) {
       result.members = unavailable(item.members, reason);
       if (item.relatives) result.relatives = unavailable(item.relatives, reason);
@@ -97,8 +97,9 @@ function row(item) {
     if (node.textContent !== value) node.textContent = value;
   };
   card.className = `card ${item.state}`;
-  text(title, item.title);
-  title.title = item.title;
+  const machineLabel = item.machineTag ? `[${item.machine.length > 16 ? `${item.machine.slice(0, 15)}...` : item.machine} /${item.reporterId.slice(0, 8)}] ` : '';
+  text(title, `${machineLabel}${item.title}`);
+  title.title = item.machineTag ? `${item.machineTag} | ${item.title}` : item.title;
   text(fullTitle, item.title);
   text(badge, `${stateLabel(item)}${item.members && item.state === 'working' && item.childCount
     ? ` ${item.runningCount}/${item.members.length}` : ''}`);
@@ -136,7 +137,7 @@ function row(item) {
   text(hierarchy, item.hierarchyIssue ? `Hierarchy unconfirmed: ${item.hierarchyIssue}` : '');
   text(compactTime, compact);
   compactTime.className = `compact-time${hasFinishedTime ? ' finished-time' : ''}`;
-  text(metadata, `${item.source} | ${item.machine}`);
+  text(metadata, `${item.source} | ${item.machineTag ?? item.machine}`);
   text(detail, item.state === 'working' && !item.members ? `${item.activity} | ${elapsed(item.startedAt)}` : item.detail);
   text(response, item.lastResponseAt ? `Last assistant response: ${time(item.lastResponseAt)}`
     : `No assistant response recorded. First observed: ${time(item.firstObservedAt)} (ordering fallback)`);
@@ -157,7 +158,16 @@ function render() {
   $('summary').textContent = `${working} working | ${sessions.length} retained ${state.members ? 'families' : 'sessions'}`;
   $('clear-finished').disabled = !state.healthy || dismissing ||
     !sessions.some(item => item.state === 'finished' && item.dismissKey);
-  $('coverage').textContent = `${state.coverage} | ${state.machine} | Read-only observation`;
+  $('coverage').textContent = `${state.healthy ? state.coverage : 'Live source coverage unavailable'} | ${state.machine} | Read-only observation`;
+  $('source-health').hidden = !state.sources;
+  if (state.sources) {
+    const sources = state.sources.map(source => state.healthy ? source
+      : { ...source, healthy: false, issues: ['Collector disconnected; cached source status is unconfirmed'] });
+    $('source-summary').textContent = `${sources.filter(source => source.healthy).length}/${sources.length} paired sources connected (expand coverage)`;
+    $('source-details').textContent = sources.map(source =>
+      `${source.label} (${source.id.slice(0, 8)}): ${source.healthy ? 'Connected' : 'UNAVAILABLE / Unconfirmed'}; last received: ${time(source.lastSeen)}${source.issues.length ? `. ${source.issues.join('; ')}` : ''}`)
+      .join('\n') || 'No watchers paired. This is not evidence that other machines are idle.';
+  }
   $('health').textContent = state.healthy
     ? (state.issues.length ? `Observing with limitations: ${state.issues.join('; ')}` : 'Live local observer connected')
     : `Status unavailable - no completion inferred. ${state.issues.join('; ')}`;
@@ -275,7 +285,7 @@ $('stop').addEventListener('click', async () => {
       state = { ...state, healthy: false, theme: null };
       render();
     }
-    $('health').textContent = 'Monitor stopped. Your Copilot sessions were not changed.';
+    $('health').textContent = 'Collector stopped. Watchers may keep retrying; Stop-Monitor.ps1 stops both local roles. Copilot sessions were not changed.';
     $('health').className = 'warning';
     $('stop').disabled = true;
     document.title = 'Stopped - Copilot session monitor';
