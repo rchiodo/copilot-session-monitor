@@ -50,9 +50,15 @@ export function observedMetadata(snapshot, samples, tracked = new Map()) {
   const current = new Map(samples.map(sample => [sample.id, sample]));
   const members = snapshot.members.map(row => {
     const sample = current.get(row.id);
-    // A local historical finish is not current remote completion authority.
-    if (row.state === 'finished' && (!sample?.alive || sample.readError || sample.completionUnconfirmed ||
-        !sample.events?.terminal || sample.events.closed || sample.events.replaced)) {
+    // A finish already confirmed by the engine's own event-tailing state machine is durable
+    // (engine.mjs deliberately keeps 'finished' rows even through a missing/dead sample or a
+    // full observation gap). The owning process exiting shortly after it finishes is the normal
+    // lifecycle for every completed run, so mere absence of fresh live evidence must not demote
+    // it back to unconfirmed. Only demote when the current sample affirmatively contradicts the
+    // finish: the owning session is unreadable/lost, completion is ambiguous relative to a newer
+    // owner, or the underlying event log was rotated/replaced.
+    if (row.state === 'finished' && sample && (sample.readError || sample.completionUnconfirmed ||
+        sample.events?.closed || sample.events?.replaced)) {
       return { ...row, completionTracked: false, state: 'unknown', finishedAt: null,
         detail: 'Finished run owner/evidence is unavailable; current status unconfirmed' };
     }

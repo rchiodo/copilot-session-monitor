@@ -198,12 +198,20 @@ test('continuously tracked late final flush can finish, but lost authority canno
   }
 });
 
-test('watcher never exports stale finished authority for missing/dead/replaced owners', () => {
+test('watcher trusts a confirmed finish through process exit or missing samples, but still demotes on affirmative loss/replacement evidence', () => {
   const snapshot = { members: [member('finished')] };
-  for (const sample of [null, { alive: false }, { alive: true, readError: 'Unavailable' },
+  // The owning process exiting right after it finishes is the normal lifecycle for every
+  // completed run (mirrors engine.mjs's own "finished persists through outages, even fully
+  // missing samples" invariant) -- neither case may demote the confirmed finish.
+  for (const sample of [null, { alive: false }]) {
+    const report = observedMetadata(snapshot, sample ? [{ id: 'parent', ...sample }] : []);
+    assert.equal(report.members[0].state, 'finished');
+  }
+  // Affirmative evidence that the finish is no longer trustworthy still demotes it.
+  for (const sample of [{ alive: true, readError: 'Unavailable' },
     { alive: true, completionUnconfirmed: 'Owner changed', events: { terminal: {} } },
     { alive: true, events: { terminal: {}, replaced: true } }]) {
-    const report = observedMetadata(snapshot, sample ? [{ id: 'parent', ...sample }] : []);
+    const report = observedMetadata(snapshot, [{ id: 'parent', ...sample }]);
     assert.equal(report.members[0].state, 'unknown');
     assert.equal(report.members[0].finishedAt, null);
   }
