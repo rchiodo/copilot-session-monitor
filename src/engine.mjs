@@ -266,7 +266,8 @@ export class MonitorEngine {
         this.observed.set(id, { runId: e.runId, owner: sample.owner, card, terminalAtObservation });
       } else if (busy && e.partial && previous && saved?.state === 'working') {
         // Retain existing execution evidence while the next JSONL record is incomplete.
-      } else if (!busy && previous && sample.source === 'Copilot desktop') {
+      } else if (!busy && previous &&
+          (sample.source === 'Copilot desktop' || sample.source === 'CLI (activity only)')) {
         if (e.terminal && !e.partial && e.runId === previous.runId &&
             e.terminal.id !== previous.terminalAtObservation) {
           await this.emit(`${id}:${e.runId}:finished`, {

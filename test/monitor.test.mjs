@@ -366,14 +366,16 @@ test('partial JSONL never confirms completion', async () => {
   assert.equal(alerts.length, 0);
 });
 
-test('standalone CLI model completion does not claim full run completion', async () => {
+test('standalone CLI model completion claims full run completion, same as desktop', async () => {
   const { engine, alerts } = rig();
   const s = state(start());
   assert.equal((await engine.update([sample(s, { source: 'CLI (activity only)' })], { now: 1000 })).active.length, 1);
   s.accept(message()); s.accept(end());
   const view = await engine.update([sample(s, { source: 'CLI (activity only)', busy: false })], { now: 2000 });
   assert.equal(view.active.length, 0);
-  assert.equal(alerts.length, 0);
+  assert.equal(view.sessions[0].state, 'finished');
+  assert.equal(alerts.length, 1);
+  assert.equal(alerts[0].kind, 'finished');
 });
 
 test('nested subagent events cannot finish root; replay event IDs are ignored', () => {

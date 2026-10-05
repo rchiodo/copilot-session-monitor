@@ -184,7 +184,7 @@ Private files remain under Git-ignored **`.local\`**:
 
 Do not publish these files, real Copilot databases/events, screenshots, or diagnostic snapshots. Dismissal hides cards but does not erase internal metadata. Other programs running as your Windows user can access local controls; this is not a hostile multi-user or public-Internet service. An authorized/compromised watcher can report false metadata **for its own identity**; the collector is not a remote attestation system.
 
-Standalone CLI coverage is **activity-only**, without full-run completion notifications. SDK `session.idle`/`assistant.idle` signals are ephemeral, not recoverable from JSONL. Short transitions entirely between observations, hidden input gates, internal deadlocks, remote/cloud work lacking a paired Windows source, and unsupported background mechanisms remain limitations. No unrelated idle archive is imported.
+Standalone CLI coverage is **activity-only**: it tracks a bare `copilot` CLI process directly, the same way desktop-chat sessions are tracked, including "Run finished" notifications when a turn ends with explicit completion evidence. SDK `session.idle`/`assistant.idle` signals are ephemeral, not recoverable from JSONL. Short transitions entirely between observations, hidden input gates, internal deadlocks, remote/cloud work lacking a paired Windows source, and unsupported background mechanisms remain limitations. No unrelated idle archive is imported.
 
 ## Troubleshooting
 
