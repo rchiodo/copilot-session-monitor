@@ -39,7 +39,8 @@ for ($i = 0; $i -lt 60; $i++) {
     Start-Sleep -Milliseconds 500
 }
 if (-not $status.healthy) { throw "$Role is running but not healthy. Check .local\$Role-error.log and collector source coverage." }
-Write-Host "$Role running. Stop with .\Stop-$((Get-Culture).TextInfo.ToTitleCase($Role)).ps1."
+$stopScript = if ($Role -eq 'collector') { 'Stop-Host.ps1' } else { 'Stop-Client.ps1' }
+Write-Host "$Role running. Stop with .\$stopScript."
 if ($Role -eq 'collector') {
     Write-Host "Dashboard: $($runtime.url)"
     if (-not $NoBrowser) { Start-Process $runtime.url }

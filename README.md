@@ -43,13 +43,13 @@ For unreleased changes, copy the working source to another PC **without `.local`
 `Start-Tray.ps1 /host` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
 
 ```powershell
-.\Start-Collector.ps1 -NoBrowser
-.\Stop-Collector.ps1
+.\Start-Host-Headless.ps1 -NoBrowser
+.\Stop-Host.ps1
 ```
 
-Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Collector.ps1` stops the collector, never Copilot sessions.
+Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Host.ps1` stops the collector, never Copilot sessions.
 
-An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Watcher.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
+An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Client.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
 
 ## Multiple-machine setup
 
@@ -62,8 +62,8 @@ This is a Live-Share-style pairing flow: generate a one-time connection string o
 **On the collector PC**, stop the local roles, opt into a private interface, then start the tray app in host mode:
 
 ```powershell
-.\Stop-Collector.ps1
-.\Initialize-Collector.ps1 -BindAddress 192.168.1.20 -IngestPort 43188 -Reconfigure
+.\Stop-Host.ps1
+.\Initialize-Host.ps1 -BindAddress 192.168.1.20 -IngestPort 43188 -Reconfigure
 .\Start-Tray.ps1 /host
 ```
 
@@ -82,7 +82,7 @@ Right-click its tray icon, choose **"Connect to host..."**, paste the connection
 Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Native notifications appear **only on the collector PC**. To stop that source watcher, use its tray icon's **"Stop watcher"** item or:
 
 ```powershell
-.\Stop-Watcher.ps1
+.\Stop-Client.ps1
 ```
 
 No remote production connectivity is assumed just because local tests pass. After pairing a second physical PC, verify its Connected status and a naturally occurring run/finish in the collector. Nothing here drives existing Copilot work to manufacture a result.
@@ -91,16 +91,16 @@ No remote production connectivity is assumed just because local tests pass. Afte
 
 | Command | Role |
 | --- | --- |
-| `.\Start-Tray.ps1 /host` | Recommended host entry point: identical to `Start-Collector.ps1`, with a tray icon offering "Generate connection request...". |
-| `.\Start-Tray.ps1` (no args) | Recommended child entry point: identical to `Start-Watcher.ps1`, with a tray icon offering "Connect to host...". |
-| `.\Initialize-Collector.ps1` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
-| `.\Start-Collector.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
-| `.\Stop-Collector.ps1` | Stop only the collector; watchers will report unavailable and retry. |
-| `.\Start-Watcher.ps1` / `.\Stop-Watcher.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
+| `.\Start-Tray.ps1 /host` | Recommended host entry point: identical to `Start-Host-Headless.ps1`, with a tray icon offering "Generate connection request...". |
+| `.\Start-Tray.ps1` (no args) | Recommended child entry point: identical to `Start-Client-Headless.ps1`, with a tray icon offering "Connect to host...". |
+| `.\Initialize-Host.ps1` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
+| `.\Start-Host-Headless.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
+| `.\Stop-Host.ps1` | Stop only the collector; watchers will report unavailable and retry. |
+| `.\Start-Client-Headless.ps1` / `.\Stop-Client.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
 
 The tray and webpage **Stop collector** control stops only the collector. Do not point one checkout's watcher at multiple collectors.
 
-For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `configuration.mjs local` plus `Start-Watcher.ps1` pointed at loopback). For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
+For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `configuration.mjs local` plus `Start-Client-Headless.ps1` pointed at loopback). For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
 
 If local PowerShell script policy blocks execution and your organization's policy permits a one-process override:
 
@@ -125,7 +125,7 @@ To revoke a remote credential on the collector, use its reporter ID from the pri
 node .\src\configuration.mjs revoke REPORTER-ID
 ```
 
-Revocation preserves retained metadata but makes that source unavailable. It does not delete Copilot work. To rotate the certificate or change the listening IP, stop the collector and use `Initialize-Collector.ps1 ... -Reconfigure`. The local profile and retained exported pairing files are updated. Stop remote watchers and re-import their updated **same-identity** pairing files through the trusted channel before restarting. Certificates expire after two years; they are not silently renewed or trusted. Keep private pairing/identity backups; a new pairing is a distinct source, not a hostname-based merge.
+Revocation preserves retained metadata but makes that source unavailable. It does not delete Copilot work. To rotate the certificate or change the listening IP, stop the collector and use `Initialize-Host.ps1 ... -Reconfigure`. The local profile and retained exported pairing files are updated. Stop remote watchers and re-import their updated **same-identity** pairing files through the trusted channel before restarting. Certificates expire after two years; they are not silently renewed or trusted. Keep private pairing/identity backups; a new pairing is a distinct source, not a hostname-based merge.
 
 ## Reading the dashboard
 

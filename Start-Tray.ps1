@@ -8,7 +8,7 @@ $ErrorActionPreference = 'Stop'
 # with its own always-visible tray icon offering role-appropriate clipboard-pairing menu items.
 $hostMode = $Arguments -contains '/host'
 if ($hostMode) {
-    & (Join-Path $PSScriptRoot 'Start-Collector.ps1') -NoBrowser:$NoBrowser
+    & (Join-Path $PSScriptRoot 'Start-Host-Headless.ps1') -NoBrowser:$NoBrowser
 } else {
-    & (Join-Path $PSScriptRoot 'Start-Watcher.ps1')
+    & (Join-Path $PSScriptRoot 'Start-Client-Headless.ps1')
 }
