@@ -45,9 +45,9 @@ export function groupFamilies(rows, relatives = []) {
           : observed.length && observed.every(row => row.state === 'finished') ? 'finished' : 'unknown';
     const finishedAt = state === 'finished'
       ? observed.map(row => row.finishedAt).filter(Boolean).sort().at(-1) : null;
-    const dismissKey = state === 'finished' && !group.issue ? createHash('sha256').update(JSON.stringify(group.rows
+    const dismissKey = (state === 'finished' || state === 'unknown') && !group.issue ? createHash('sha256').update(JSON.stringify([state, group.rows
       .map(row => [row.id, row.parentId ?? null, row.runId, row.startedAt, row.finishedAt, Boolean(row.contextOnly)])
-      .sort((a, b) => a[0].localeCompare(b[0])))).digest('hex') : null;
+      .sort((a, b) => a[0].localeCompare(b[0]))])).digest('hex') : null;
     return {
       ...parent, state, finishedAt, hierarchyIssue: group.issue,
       detail: state === 'working' ? `${working.length} observed family member(s) working`
@@ -89,7 +89,7 @@ export class FamilyMonitor {
     if (!Array.isArray(entries) || !entries.length || entries.length > 1000 ||
         entries.some(entry => typeof entry?.id !== 'string' || entry.id.length > 200 ||
           typeof entry.key !== 'string' || !/^[a-f0-9]{64}$/.test(entry.key))) {
-      throw new TypeError('Expected 1-1000 finished family IDs and revision keys');
+      throw new TypeError('Expected 1-1000 dismissable family IDs and revision keys');
     }
     const current = new Map(groupFamilies([...this.rows.values()], this.relatives).map(row => [row.id, row]));
     const result = { dismissed: [], skipped: [] };

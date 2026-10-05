@@ -233,7 +233,7 @@ test('one family card separates aggregate work from the parent alert and exposes
   assert.match(part(card, 'hierarchy-warning').textContent, /Recorded parent is missing/);
 });
 
-test('dismiss controls are distinct native buttons, only finished, and never toggle disclosure', async () => {
+test('dismiss controls are distinct native buttons, only shown when a dismissKey exists, and never toggle disclosure', async () => {
   const finished = { ...session('finished'), dismissKey: 'a'.repeat(64) };
   const fixture = await page([finished, session('waiting'), session('error'), session('unknown'), session('working')]);
   const card = fixture.nodes.get('retained').children[0], button = part(card, 'dismiss');
@@ -257,6 +257,16 @@ test('dismiss controls are distinct native buttons, only finished, and never tog
   assert.equal(fixture.nodes.get('clear-finished').disabled, true);
   assert.equal(fixture.document.activeElement, fixture.nodes.get('dismiss-result'));
   assert.match(fixture.nodes.get('dismiss-result').textContent, /Copilot sessions and files are unchanged/);
+});
+
+test('an unconfirmed (unknown) session with a dismissKey shows a Dismiss button, but one without a dismissKey does not', async () => {
+  const dismissable = { ...session('unknown', 'u1'), dismissKey: 'b'.repeat(64) };
+  const fixture = await page([dismissable, session('unknown', 'u2')]);
+  const cards = fixture.nodes.get('retained').children;
+  assert.equal(part(cards[0], 'dismiss').hidden, false);
+  assert.equal(part(cards[1], 'dismiss').hidden, true);
+  await part(cards[0], 'dismiss').handlers.click({ preventDefault() {}, stopPropagation() {} });
+  assert.equal(fixture.requests[0].entries[0].id, 'u1');
 });
 
 test('bulk dismissal sends only visible finished revisions; full dormant descendant names wrap in details', async () => {
@@ -283,7 +293,7 @@ test('responsive column markup and styles allow wrapping and stack on narrow vie
     readFile(new URL(`../public/${file}`, import.meta.url), 'utf8')));
   assert.match(html, /aria-labelledby="running-heading"/);
   assert.match(html, /aria-labelledby="retained-heading"/);
-  assert.match(html, /Errors\/unconfirmed stay. Dismiss is monitor-only/);
+  assert.match(html, /Errors\/waiting stay\. Finished and unconfirmed rows can be dismissed individually \(monitor-only\)/);
   assert.match(css, /\.session-columns\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(css, /@media \(max-width: 900px\)\s*\{\s*\.session-columns\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   assert.match(css, /\.session-column\s*\{\s*min-width:\s*0/);

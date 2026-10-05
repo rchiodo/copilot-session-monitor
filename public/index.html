@@ -38,7 +38,7 @@
         <h2 id="retained-heading" class="column-heading">Finished / Needs input <span id="retained-count" class="column-count">0</span>
           <button id="clear-finished" type="button" disabled title="Dismiss finished entries from this monitor only. Copilot sessions and files are unchanged.">Clear finished</button>
         </h2>
-        <p class="muted">Errors/unconfirmed stay. Dismiss is monitor-only.</p>
+        <p class="muted">Errors/waiting stay. Finished and unconfirmed rows can be dismissed individually (monitor-only).</p>
         <div id="retained"></div>
         <p id="retained-empty" class="empty-state" hidden>No finished or attention-needed families to show.</p>
       </section>
@@ -51,7 +51,7 @@
     <footer>
       <p>A completion alert means <strong>all observed family runs finished</strong>, not that the entire task or PR succeeded. The card's parent alert is separate.</p>
       <p>Only explicitly paired Windows watchers are covered. Source labels identify machines; unavailable sources are never assumed finished. CLI coverage is activity-only.</p>
-      <p>Dismiss hides finished monitor entries until new family work is observed. It never deletes Copilot sessions, files, history or worktrees. Expand for all known linked descendant names; unobserved execution is labeled explicitly.</p>
+      <p>Dismiss hides a finished or unconfirmed monitor entry until new family work is observed. It never deletes Copilot sessions, files, history or worktrees. Expand for all known linked descendant names; unobserved execution is labeled explicitly.</p>
       <p id="updated"></p>
       <button id="stop" class="secondary" type="button">Stop collector</button>
     </footer>

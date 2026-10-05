@@ -97,6 +97,17 @@ export async function pair(label, local = false) {
   return path.join(dataDir, file);
 }
 
+export async function ensureLocalReporter(config) {
+  let local = config.reporters.find(row => row.legacy);
+  if (!local) {
+    local = { id: randomUUID(), label: os.hostname(), tokenHash: digest(randomBytes(32).toString('hex')), legacy: true };
+    config.reporters.push(local);
+    validateCollector(config);
+    await saveConfig('collector.json', config);
+  }
+  return local.id;
+}
+
 export async function pairConnectionString(label) {
   const file = await pair(label);
   const pairing = await readConfig(path.basename(file));
@@ -108,7 +119,7 @@ export async function migrateLegacy(config, collectorFile) {
   const local = config.reporters.find(row => row.legacy);
   const legacy = await optionalConfig('sessions.json');
   if (!legacy) return;
-  if (!local) throw new Error('Existing single-machine state requires Start-Monitor once to establish its local watcher identity');
+  if (!local) throw new Error('Existing single-machine state requires a local reporter identity; run "node src/configuration.mjs local" once, or start the collector with self-observation enabled (the default)');
   const backup = path.join(dataDir, `backup-${new Date().toISOString().replace(/[:.]/g, '-')}`);
   await mkdir(backup);
   for (const file of ['sessions.json', 'notifications.json']) {

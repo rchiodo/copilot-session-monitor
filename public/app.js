@@ -89,10 +89,10 @@ function row(item) {
   const { card, title, badge, compactTime, fullTitle, metadata, detail, response, finished, identity,
     parentAlert, relatives, hierarchy, dismiss } = parts;
   parts.item = item;
-  dismiss.hidden = item.state !== 'finished' || !item.dismissKey;
+  dismiss.hidden = !['finished', 'unknown'].includes(item.state) || !item.dismissKey;
   dismiss.disabled = !state.healthy || dismissing;
   dismiss.setAttribute('aria-label', `Dismiss ${item.title} from this monitor only`);
-  dismiss.title = 'Remove this finished entry from this monitor only. Copilot sessions and files are unchanged.';
+  dismiss.title = 'Remove this finished or unconfirmed entry from this monitor only. Copilot sessions and files are unchanged.';
   const text = (node, value) => {
     if (node.textContent !== value) node.textContent = value;
   };

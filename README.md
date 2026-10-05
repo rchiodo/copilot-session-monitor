@@ -1,6 +1,6 @@
 # Copilot session monitor for Windows
 
-A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and receives native notifications. Every source PC, including the collector PC when desired, runs its own watcher.
+A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and receives native notifications. The collector automatically observes its own machine's Copilot sessions — no separate local watcher needed. A watcher is only required on each *additional* PC whose sessions you want to see on the collector's dashboard.
 
 The multi-machine changes are currently a working-tree implementation; use this same version on every PC. A previously published version may support only one machine. There are no npm dependencies, cloud relay, accounts, service installation, or automatic startup registration.
 
@@ -8,14 +8,15 @@ The multi-machine changes are currently a working-tree implementation; use this 
 
 ```mermaid
 flowchart LR
-    A["PC A: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C["Collector on PC A"]
-    B["PC B: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C
+    B["PC B: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C["Collector on PC A"]
     D["PC C: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C
+    A["PC A: local Copilot (self-observed in-process)"] -.->|No network, no watcher| C
     C --> W["Loopback webpage on PC A"]
     C --> N["Windows notifications on PC A"]
 ```
 
-- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage or completion-notification tray, and needs no chat/model running. It does show a small tray icon with a **"Connect to host..."** menu for pairing (see below).
+- **Collector self-observation:** the collector polls its own machine's Copilot sessions directly in-process (the same cadence/logic as a watcher, reused internally) and feeds them into its own pipeline under a fixed, built-in local reporter identity. No separate watcher process, pairing step, or network hop is needed for the collector's own machine. Set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable this and go back to requiring an explicit local watcher instead.
+- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage or completion-notification tray, and needs no chat/model running. It does show a small tray icon with a **"Connect to host..."** menu for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
 - **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the notification tray — including a **"Generate connection request for a sub machine..."** menu item for pairing new watchers. It never opens a remote Copilot database or filesystem.
 - These are **two logical roles**, not a promise of two OS PIDs. Each Node process has a Windows PowerShell helper that also renders that role's tray icon and menu. The watcher's helper supplies process/power evidence and the pairing dialog; the collector's helper supplies Windows theme, power events, notifications, and the connection-string generator.
 
@@ -39,20 +40,20 @@ cd .\copilot-session-monitor
 
 For unreleased changes, copy the working source to another PC **without `.local`, `.git`, or generated evidence** rather than assuming GitHub already contains those changes.
 
-`Start-Monitor.ps1` prepares an app-local certificate and local watcher pairing, then starts an independent collector and watcher. The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
+`Start-Monitor.ps1` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). It's kept as a backward-compatible alias for `Start-Collector.ps1`. The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
 
 ```powershell
 .\Start-Monitor.ps1 -NoBrowser
 .\Stop-Monitor.ps1
 ```
 
-Closing the browser, terminal, or Copilot chat does not stop either role. Start again after signing in/rebooting. `Stop-Monitor.ps1` stops both roles belonging to this checkout, never Copilot sessions.
+Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Monitor.ps1` stops the collector (and, as a safety net, any watcher still running from before self-observation existed), never Copilot sessions.
 
-An existing one-machine installation must be stopped before its first split-mode start. Migration makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's session and notification stores, preserves first-observed times/dismissal revisions/dedupe, and namespaces records under its new stable local reporter identity. Original legacy files remain untouched. No Copilot data is migrated or changed.
+An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Watcher.ps1` or `.\Stop-Monitor.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
 
 ## Multiple-machine setup
 
-Use the same source version on each PC. Choose **one collector PC** with a stable private IP reachable through your LAN or existing VPN. The IP below is a synthetic example; replace it with an assigned IP on that PC. Wildcard/public binds are rejected.
+Use the same source version on each PC. Choose **one collector PC** with a stable private IP reachable through your LAN or existing VPN. The IP below is a synthetic example; replace it with an assigned IP on that PC. Wildcard/public binds are rejected. The collector PC's own sessions are already shown automatically (self-observation) — this section is only for adding *additional* PCs.
 
 ### Recommended: tray + clipboard connection string
 
@@ -117,11 +118,11 @@ Compare the import's printed certificate fingerprint with the collector's finger
 | `.\Start-Collector.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
 | `.\Stop-Collector.ps1` | Stop only the collector; watchers will report unavailable and retry. |
 | `.\Start-Watcher.ps1` / `.\Stop-Watcher.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
-| `.\Start-Monitor.ps1` / `.\Stop-Monitor.ps1` | Easy local collector + watcher orchestration. |
+| `.\Start-Monitor.ps1` / `.\Stop-Monitor.ps1` | Backward-compatible alias for `Start-Collector.ps1` / `Stop-Collector.ps1`. `Stop-Monitor.ps1` also stops any leftover watcher from a pre-self-observation install, as a migration safety net. |
 
-The tray and webpage **Stop collector** control stops only the collector. Use `Stop-Monitor.ps1` to stop both local roles. Do not point one checkout's watcher at multiple collectors.
+The tray and webpage **Stop collector** control stops only the collector. Use `Stop-Monitor.ps1` if you also want to stop a leftover watcher from before self-observation existed. Do not point one checkout's watcher at multiple collectors.
 
-For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
+For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `configuration.mjs local` plus `Start-Watcher.ps1` pointed at loopback). For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
 
 If local PowerShell script policy blocks execution and your organization's policy permits a one-process override:
 
@@ -164,7 +165,7 @@ Collapsed rows are approximately 56px on desktop, with about ten visible at a 12
 
 ### Dismissal and notifications
 
-**Dismiss** and **Clear finished** remove only safely finished entries from this monitor's visible list, never Copilot sessions/files/history/worktrees. Working, waiting, error, offline, and unconfirmed families cannot be dismissed.
+**Dismiss** removes a single safely finished or unconfirmed entry from this monitor's visible list; **Clear finished** bulk-removes only finished entries. Neither ever touches Copilot sessions/files/history/worktrees. Working, waiting, error, and offline families cannot be dismissed. Unconfirmed families (for example, a session that finished before the monitor started observing it) are dismissable per-row so they do not get stuck permanently — the same revision-key safety check applies, so a family that resumes activity after its unconfirmed key was issued cannot be silently dismissed.
 
 The collector checks current report freshness and completed-run revision on each action; stale revisions are skipped. New parent/descendant work restores the family on the next report. Network delay means a source change is not instantaneous at the collector, but a dismissal cannot permanently hide subsequently reported new work. Dismissal survives restart. During source uncertainty a previously dismissed card may reappear as Unconfirmed; unchanged safely revalidated finishes remain dismissed.
 
@@ -178,7 +179,7 @@ The ingestion listener exposes only authenticated `POST /v1/connect`, `/v1/repor
 
 Each watcher has a durable installation ID, increasing boot generation, fresh boot ID, collector-issued lease, and increasing sequence. Exact duplicate reports are acknowledged without replay; reordered/conflicting reports and old leases are rejected. A newer boot cannot seize an active lease. A crash may require waiting for the 15-second lease to expire.
 
-Watchers normally report about every 1.5 seconds. Missing heartbeats for 15 seconds, disconnection, clock skew, unavailable readers/owners, unsupported evidence, and collector restart make affected families Unconfirmed and non-dismissable. Other connected machines remain visible as working. Source coverage lists paired-but-never-connected and revoked/offline sources rather than implying all machines are idle.
+Watchers normally report about every 1.5 seconds. Missing heartbeats for 15 seconds, disconnection, clock skew, unavailable readers/owners, unsupported evidence, and collector restart make affected families Unconfirmed; these are dismissable per-row (bulk Clear finished remains finished-only) once a stable revision key can be computed for them. Other connected machines remain visible as working. Source coverage lists paired-but-never-connected and revoked/offline sources rather than implying all machines are idle.
 
 Reconnect starts a fresh baseline and drops completion authority across the gap. Work that finished while the collector could not continuously observe it is not retroactively promoted to confirmed completion. Previously confirmed unchanged finishes can be restored, but old alerts do not replay. Notification dedupe is durable and **at-most-once**: a crash between persistence and delivery may lose an alert rather than duplicate it.
 
@@ -198,7 +199,8 @@ Private files remain under Git-ignored **`.local\`**:
 | --- | --- |
 | `collector.json`, `collector.pfx`, `collector-cert.pem`, `pairing-*.json` | Collector identity, reporter credential hashes, TLS material, private transfer bundles. |
 | `collector-state.json`, `notifications.json` | Central retained source/family metadata, first-seen times, dismissals, and notification dedupe. |
-| `watcher.json`, `watcher-identity.json`, `watcher-sessions.json` | Private pairing/credential, stable installation/generation, local metadata-only observation cache. |
+| `watcher.json`, `watcher-identity.json`, `watcher-sessions.json` | Private pairing/credential, stable installation/generation, local metadata-only observation cache (remote-watcher mode). |
+| `collector-local-identity.json`, `collector-local-sessions.json` | The collector's own self-observation installation/generation identity and metadata-only observation cache for its own machine. |
 | `runtime.json`, `watcher-runtime.json`, `*.lock`, `*-error.log`, `*.log` | Local process/control identity and diagnostics. No reporter credentials are placed in normal logs. |
 | `backup-*`, legacy `sessions.json` | Preserved one-machine migration state. |
 

@@ -1,4 +1,3 @@
-import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import { randomUUID, randomBytes } from 'node:crypto';
@@ -7,10 +6,9 @@ import { spawn } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { root, dataDir, powershell, readConfig, optionalConfig, saveConfig } from './configuration.mjs';
 import { acquireRole } from './lifecycle.mjs';
-import { LocalSource } from './source.mjs';
 import { SessionStore } from './engine.mjs';
-import { FamilyMonitor } from './families.mjs';
-import { observedMetadata, digest, decodeConnectionString } from './protocol.mjs';
+import { decodeConnectionString } from './protocol.mjs';
+import { createLocalObserver, pollLocal, localReportPayload } from './local-report.mjs';
 import { Reporter } from './reporter.mjs';
 
 if (process.platform !== 'win32') throw new Error('The watcher requires Windows process evidence.');
@@ -103,26 +101,13 @@ async function poll() {
       await reporter.connect();
     }
     notices = [];
-    let result, issues = [], healthy = true, samples = [];
-    try {
-      if (reset) { const reason = reset; reset = null; throw new Error(reason); }
-      const observed = await source.poll();
-      samples = observed.samples;
-      result = await monitor.update(observed.samples, { relatives: observed.relatives });
-      issues = observed.issues;
-      healthy = !result.gap;
-      for (const id of monitor.rows.keys()) source.tracked.add(id);
-      source.releaseIdle(new Set(monitor.rows.keys()));
-    } catch (error) {
-      healthy = false;
-      issues = [`Local observation unavailable (${error.code ?? error.name}); no completion inferred`];
-      result = await monitor.update([], { healthy: false, reason: issues[0] });
-    }
-    await store.save(result.members);
-    const response = await reporter.send({ ...observedMetadata({ ...result, relatives: monitor.relatives }, samples, monitor.observed),
-      healthy, issues, notices });
-    health = { healthy: healthy && response.healthy !== false,
-      issue: healthy ? null : issues.join('; '), lastAcknowledgedAt: new Date().toISOString() };
+    let forcedGapReason = null;
+    if (reset) { forcedGapReason = reset; reset = null; }
+    const outcome = await pollLocal({ source, monitor }, forcedGapReason);
+    await store.save(outcome.result.members);
+    const response = await reporter.send(localReportPayload(monitor, outcome, notices));
+    health = { healthy: outcome.healthy && response.healthy !== false,
+      issue: outcome.healthy ? null : outcome.issues.join('; '), lastAcknowledgedAt: new Date().toISOString() };
     lastError = null;
   } catch (error) {
     reporter.lease = null;
@@ -137,11 +122,8 @@ async function beginReporting(nextPairing) {
   if (reporter) { try { await reporter.disconnect(); } catch (error) { console.error(`Collector disconnect not acknowledged (${error.status ?? error.code})`); } }
   pairing = nextPairing;
   reporter = new Reporter(pairing, identity);
-  monitor = new FamilyMonitor(pairing.label, async (key, alert) => {
-    notices.push({ key: digest(key), familyId: alert.familyId, kind: alert.kind });
-  }, await store.load());
-  source = new LocalSource(path.join(os.homedir(), '.copilot'), () => processes);
-  for (const id of monitor.rows.keys()) source.tracked.add(id);
+  ({ monitor, source } = createLocalObserver(pairing.label, await store.load(), () => processes,
+    notice => notices.push(notice)));
   notices = [];
   health = { healthy: false, issue: 'Starting watcher', lastAcknowledgedAt: null };
   timer = setInterval(poll, 1500);

@@ -9,18 +9,25 @@ import { createInterface } from 'node:readline';
 import { Ledger, SessionStore } from './engine.mjs';
 import { Collector } from './collector.mjs';
 import { MonitorActions, readDismissEntries } from './actions.mjs';
-import { root, dataDir, powershell, loadCollector, saveConfig, migrateLegacy, pairConnectionString } from './configuration.mjs';
+import { root, dataDir, powershell, loadCollector, saveConfig, optionalConfig, migrateLegacy, pairConnectionString, ensureLocalReporter } from './configuration.mjs';
 import { acquireRole } from './lifecycle.mjs';
 import { authorized, readJson, digest, fail, HASH } from './protocol.mjs';
+import { createLocalObserver, pollLocal, localReportPayload } from './local-report.mjs';
 
 if (process.platform !== 'win32') throw new Error('The collector requires Windows for native notifications.');
 if (Number(process.versions.node.split('.')[0]) < 24) throw new Error('Node.js 24 or newer is required.');
 const port = Number(process.env.MONITOR_PORT ?? '43187');
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('MONITOR_PORT must be 1024-65535.');
 const url = `http://127.0.0.1:${port}`, instanceId = randomUUID(), token = randomBytes(32).toString('hex');
+// A dedicated hub (pure aggregation display, no coding on it) can opt out of
+// watching its own machine; everything else about self-observation below
+// depends on this flag so a disabled hub never auto-creates a legacy
+// reporter identity it will never use.
+const selfObserve = (process.env.MONITOR_SELF_OBSERVE ?? '1') !== '0';
 await mkdir(dataDir, { recursive: true });
 const release = await acquireRole(dataDir, 'collector');
 const config = await loadCollector();
+const localReporterId = selfObserve ? await ensureLocalReporter(config) : null;
 const collectorFile = path.join(dataDir, 'collector-state.json');
 await migrateLegacy(config, collectorFile);
 const legacy = new SessionStore(path.join(dataDir, 'sessions.json'));
@@ -56,6 +63,49 @@ async function refreshConfiguration() {
 }
 const actions = new MonitorActions(collector, refreshConfiguration, () => collector.save(),
   () => !stopping && !fault && bridgeReady);
+
+// Self-observation: the collector watches its OWN machine's Copilot sessions
+// in-process, using the same always-present "legacy" reporter identity a
+// local watcher would otherwise use, so a separate paired watcher is never
+// required just to see the host's own activity. A pre-existing split install
+// (an already-running separate watcher.mjs for this same machine) seeds its
+// installationId/generation here so the handover is accepted rather than
+// permanently rejected as an identity conflict; see watcher-identity.json.
+const localStore = new SessionStore(path.join(dataDir, 'collector-local-sessions.json'));
+const savedLocalIdentity = selfObserve ? await optionalConfig('collector-local-identity.json') : null;
+const legacyWatcherIdentity = selfObserve && !savedLocalIdentity ? await optionalConfig('watcher-identity.json') : null;
+const localSeed = savedLocalIdentity ?? legacyWatcherIdentity;
+const localIdentity = { installationId: localSeed?.installationId ?? randomUUID(),
+  generation: (localSeed?.generation ?? 0) + 1, bootId: randomUUID() };
+if (selfObserve) await saveConfig('collector-local-identity.json', localIdentity);
+let processes = null, localReset = null, localLease = null, localSeq = 0, localPolling = false, localNotices = [];
+const localObserver = selfObserve ? createLocalObserver(os.hostname(), await localStore.load(), () => processes,
+  notice => localNotices.push(notice)) : null;
+async function localPoll() {
+  if (!selfObserve || localPolling || stopping) return;
+  localPolling = true;
+  try {
+    await actions.run(async () => {
+      if (!localLease) {
+        await localObserver.monitor.update([], { healthy: false, reason: 'Collector connection changed; rebaselining' });
+        const connected = await collector.connect({ version: 1, reporterId: localReporterId, ...localIdentity });
+        localLease = connected.lease;
+        localSeq = 0;
+      }
+      localNotices = [];
+      let forcedGapReason = null;
+      if (localReset) { forcedGapReason = localReset; localReset = null; }
+      const outcome = await pollLocal(localObserver, forcedGapReason);
+      await localStore.save(outcome.result.members);
+      const payload = localReportPayload(localObserver.monitor, outcome, localNotices);
+      await collector.accept({ version: 1, reporterId: localReporterId, lease: localLease,
+        seq: ++localSeq, sentAt: new Date().toISOString(), ...payload });
+    });
+  } catch (error) {
+    localLease = null;
+    console.error(`Local self-observation unavailable (${error.status ? error.message : error.code ?? error.name})`);
+  } finally { localPolling = false; }
+}
 
 function status() {
   const result = collector.snapshot();
@@ -154,7 +204,7 @@ server.headersTimeout = 5000;
 await new Promise((resolve, reject) => { server.once('error', reject); server.listen(port, '127.0.0.1', resolve); });
 await saveConfig('runtime.json', { pid: process.pid, instanceId, url, token });
 bridge = spawn(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass',
-  '-File', path.join(root, 'windows', 'tray.ps1'), '-MonitorUrl', url, '-CollectorOnly'],
+  '-File', path.join(root, 'windows', 'tray.ps1'), '-MonitorUrl', url],
 { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
 createInterface({ input: bridge.stdout }).on('line', async line => {
   try {
@@ -181,22 +231,31 @@ createInterface({ input: bridge.stdout }).on('line', async line => {
       }
     }
     else if (event.type === 'power') {
+      processes = null;
+      localReset = 'Windows process observation interrupted; rebaselining';
       await actions.run(async () => {
         for (const source of collector.sources.values()) if (source.lease) collector.disconnect(source.id, source.lease);
       });
-    } else if (event.type === 'error') throw new Error('Native helper error');
+    } else if (event.type === 'processes') { processes = { at: Date.now(), processes: event.processes }; }
+    else if (event.type === 'error') {
+      processes = null;
+      localReset = 'Windows process observation interrupted; rebaselining';
+      throw new Error('Native helper error');
+    }
   } catch (error) { fault = 'Native helper unavailable'; console.error(`${fault} (${error.name})`); }
 });
 bridge.stderr.on('data', () => console.error('Collector Windows helper reported an error'));
 bridge.stdin.on('error', error => console.error(`Collector helper pipe failed (${error.code})`));
 bridge.on('error', error => { bridgeReady = false; console.error(`Collector helper unavailable (${error.code})`); });
-bridge.on('exit', () => { bridgeReady = false; if (!stopping) console.error('Collector native helper stopped'); });
+bridge.on('exit', () => { bridgeReady = false; processes = null; if (!stopping) console.error('Collector native helper stopped'); });
 const timer = setInterval(() => {
   void actions.run(async () => {
     try { await refreshConfiguration(); collector.snapshot(); fault = null; }
     catch (error) { fault = 'Collector configuration unavailable'; console.error(`${fault} (${error.code ?? error.name})`); }
   });
+  void localPoll();
 }, 1500);
+await localPoll();
 async function stop() {
   if (stopping) return;
   stopping = true;
@@ -204,7 +263,11 @@ async function stop() {
   for (const listener of listeners) { listener.close(); listener.closeAllConnections(); }
   server.close();
   if (bridge.stdin.writable) bridge.stdin.end('{"type":"stop"}\n');
-  await actions.run(async () => { await collector.save(); await unlink(path.join(dataDir, 'runtime.json')); await release(); });
+  while (localPolling) await new Promise(resolve => setTimeout(resolve, 50));
+  await actions.run(async () => {
+    if (localLease) { try { collector.disconnect(localReporterId, localLease); } catch { /* lease already invalid */ } }
+    await collector.save(); await unlink(path.join(dataDir, 'runtime.json')); await release();
+  });
   setTimeout(() => { if (bridge.exitCode === null) bridge.kill(); process.exit(0); }, 1200);
 }
 process.on('SIGINT', () => void stop());

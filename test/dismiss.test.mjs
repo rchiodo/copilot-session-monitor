@@ -26,7 +26,7 @@ function event(events, type, id, data = {}) {
   events.accept({ type, id, timestamp: at, data });
 }
 
-test('individual/bulk dismissal only hides finished families, preserving observations and other states', () => {
+test('individual/bulk dismissal hides finished and unconfirmed families, preserving working/waiting/error', () => {
   const rows = [
     row('p'), row('c', 'finished', 'p'), row('another'),
     row('work', 'working'), row('wait', 'waiting'), row('err', 'error'), row('unknown', 'unknown'),
@@ -37,10 +37,46 @@ test('individual/bulk dismissal only hides finished families, preserving observa
   const request = entries(monitor);
   assert.deepEqual(monitor.dismiss(request.slice(0, 1)).dismissed, [request[0].id]);
   const result = monitor.dismiss(request);
-  assert.equal(result.dismissed.length, 2);
-  assert.equal(result.skipped.length, 4);
-  assert.equal(monitor.snapshot().sessions.length, 4);
+  assert.equal(result.dismissed.length, 3);
+  assert.equal(result.skipped.length, 3);
+  assert.equal(monitor.snapshot().sessions.length, 3);
   assert.deepEqual([...monitor.rows.entries()], before);
+});
+
+test('an unconfirmed (never-observed-finishing) family can be dismissed, survives restart, and is restored by new work', async t => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'monitor-dismiss-unconfirmed-test-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new SessionStore(path.join(dir, 'sessions.json'));
+  const monitor = new FamilyMonitor('TEST', async () => {}, [row('stuck', 'unknown')]);
+  const [entry] = entries(monitor);
+  assert.match(entry.key, /^[a-f0-9]{64}$/);
+  assert.deepEqual(monitor.dismiss([entry]).dismissed, ['stuck']);
+  assert.equal(monitor.snapshot().sessions.length, 0);
+  await store.save(monitor.snapshot().members, monitor.dismissed);
+  const loaded = new SessionStore(store.file);
+  const restored = new FamilyMonitor('TEST', async () => assert.fail('No historical alert'), await loaded.load(), loaded.dismissed);
+  assert.equal(restored.snapshot().sessions.length, 0);
+  const events = new EventState();
+  event(events, 'assistant.turn_start', 'start', { interactionId: 'new-stuck', turnId: '0' });
+  const working = await restored.update([sample('stuck', events)], { now: 1000 });
+  assert.equal(working.sessions[0].state, 'working');
+  assert.equal(restored.dismissed.size, 0);
+});
+
+test('an unconfirmed family with a stale dismiss key cannot be dismissed (replay-safety)', () => {
+  const monitor = new FamilyMonitor('TEST', async () => {}, [row('stuck', 'unknown')]);
+  const result = monitor.dismiss([{ id: 'stuck', key: 'a'.repeat(64) }]);
+  assert.deepEqual(result.dismissed, []);
+  assert.equal(result.skipped.length, 1);
+  assert.equal(monitor.snapshot().sessions.length, 1);
+});
+
+test('bulk "Clear finished" never dismisses unconfirmed families, only the per-row Dismiss control does', () => {
+  const monitor = new FamilyMonitor('TEST', async () => {}, [row('stuck', 'unknown'), row('done', 'finished')]);
+  const finishedOnly = groupFamilies([...monitor.rows.values()]).filter(item => item.state === 'finished');
+  const result = monitor.dismiss(finishedOnly.map(item => ({ id: item.id, key: item.dismissKey })));
+  assert.deepEqual(result.dismissed, ['done']);
+  assert.equal(monitor.snapshot().sessions.find(item => item.id === 'stuck').state, 'unknown');
 });
 
 test('dismissed-run markers survive storage and restart without replay or removing dedupe', async t => {

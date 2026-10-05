@@ -147,7 +147,10 @@ test('unknown, failed or cancelled background outcomes never imply successful co
     const view = await monitor.update([sample('child', state, false, null, extra)], { now: 2000 });
     assert.notEqual(view.sessions[0].state, 'finished', mode);
     assert.equal(view.sessions[0].finishedAt, null, mode);
-    assert.equal(view.sessions[0].dismissKey, null, mode);
+    // error-state outcomes (failed/cancelled) stay non-dismissable; unknown-state outcomes
+    // (unknown/owner-changed/dead) are unconfirmed and get a real dismissKey so they don't get stuck.
+    if (view.sessions[0].state === 'unknown') assert.match(view.sessions[0].dismissKey, /^[a-f0-9]{64}$/, mode);
+    else assert.equal(view.sessions[0].dismissKey, null, mode);
     assert.equal(alerts.some(a => a.kind === 'finished'), false, mode);
   }
 });

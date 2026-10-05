@@ -39,7 +39,12 @@ test('isolated HTTPS collector and watcher processes: TLS/auth, lifecycle, offli
   const dir = await mkdtemp(path.join(os.tmpdir(), 'monitor-network-fixture-'));
   const hub = path.join(dir, 'hub');
   const uiPort = await freePort(), ingestPort = await freePort();
-  const env = { ...process.env, MONITOR_DATA_DIR: hub, MONITOR_PORT: String(uiPort) };
+  // This fixture drives a synthetic worker through the always-present "legacy"
+  // reporter slot with a random, unrelated installationId to test dedup/dismiss/
+  // migration-continuity deterministically. Self-observation would independently
+  // (and correctly) claim that same slot with its own real identity first, so it
+  // is disabled here; it has its own dedicated coverage in self-observation.test.mjs.
+  const env = { ...process.env, MONITOR_DATA_DIR: hub, MONITOR_PORT: String(uiPort), MONITOR_SELF_OBSERVE: '0' };
   const owned = [];
   let server, output = '';
   const spawnOwned = (args, extra = {}, ipc = false) => {
@@ -104,7 +109,7 @@ test('isolated HTTPS collector and watcher processes: TLS/auth, lifecycle, offli
   };
   const initial = await start();
   assert.equal(initial.sessions[0].state, 'unknown');
-  assert.equal(initial.sessions[0].dismissKey, null);
+  assert.match(initial.sessions[0].dismissKey, /^[a-f0-9]{64}$/);
   assert.equal(initial.sources.length, 3);
   assert.ok((await readdir(hub)).some(name => name.startsWith('backup-')));
   assert.deepEqual(JSON.parse(await readFile(path.join(hub, 'notifications.json'))).keys, originalKeys);
@@ -243,7 +248,7 @@ test('isolated HTTPS collector and watcher processes: TLS/auth, lifecycle, offli
   await reportRequest(pairings[2], '/v1/connect', handshake);
   await assert.rejects(reportRequest(pairings[2], '/v1/report', packet), error => error.status === 409);
   view = await waitFor(state => state.sources.every(source => !source.healthy), 'Heartbeat expiry for silent synthetic watchers', 18000);
-  assert.equal(view.sessions.every(row => row.state === 'unknown' && row.dismissKey === null), true);
+  assert.equal(view.sessions.every(row => row.state === 'unknown' && /^[a-f0-9]{64}$/.test(row.dismissKey)), true);
   assert.deepEqual(JSON.parse(await readFile(path.join(hub, 'notifications.json'))).keys, savedKeys);
   await stop();
   await start();
