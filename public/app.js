@@ -222,7 +222,7 @@ async function loadStatus() {
       state = { ...state, healthy: false, theme: null };
       render();
     }
-    $('health').textContent = 'Monitor disconnected. Run Start-Monitor.ps1 to reconnect. No completion inferred.';
+    $('health').textContent = 'Monitor disconnected. Run Start-Tray.ps1 /host to reconnect. No completion inferred.';
     $('health').className = 'warning';
     document.title = 'Status unavailable - Copilot session monitor';
   }
@@ -285,7 +285,7 @@ $('stop').addEventListener('click', async () => {
       state = { ...state, healthy: false, theme: null };
       render();
     }
-    $('health').textContent = 'Collector stopped. Watchers may keep retrying; Stop-Monitor.ps1 stops both local roles. Copilot sessions were not changed.';
+    $('health').textContent = 'Collector stopped. Watchers may keep retrying. Copilot sessions were not changed.';
     $('health').className = 'warning';
     $('stop').disabled = true;
     document.title = 'Stopped - Copilot session monitor';

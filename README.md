@@ -35,21 +35,21 @@ Obtain the source, then run in PowerShell from its directory:
 ```powershell
 git clone https://github.com/rchiodo/copilot-session-monitor.git
 cd .\copilot-session-monitor
-.\Start-Monitor.ps1
+.\Start-Tray.ps1 /host
 ```
 
 For unreleased changes, copy the working source to another PC **without `.local`, `.git`, or generated evidence** rather than assuming GitHub already contains those changes.
 
-`Start-Monitor.ps1` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). It's kept as a backward-compatible alias for `Start-Collector.ps1`. The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
+`Start-Tray.ps1 /host` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
 
 ```powershell
-.\Start-Monitor.ps1 -NoBrowser
-.\Stop-Monitor.ps1
+.\Start-Collector.ps1 -NoBrowser
+.\Stop-Collector.ps1
 ```
 
-Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Monitor.ps1` stops the collector (and, as a safety net, any watcher still running from before self-observation existed), never Copilot sessions.
+Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Collector.ps1` stops the collector, never Copilot sessions.
 
-An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Watcher.ps1` or `.\Stop-Monitor.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
+An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Watcher.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
 
 ## Multiple-machine setup
 
@@ -62,7 +62,7 @@ This is a Live-Share-style pairing flow: generate a one-time connection string o
 **On the collector PC**, stop the local roles, opt into a private interface, then start the tray app in host mode:
 
 ```powershell
-.\Stop-Monitor.ps1
+.\Stop-Collector.ps1
 .\Initialize-Collector.ps1 -BindAddress 192.168.1.20 -IngestPort 43188 -Reconfigure
 .\Start-Tray.ps1 /host
 ```
@@ -87,27 +87,6 @@ Check **paired source coverage** on the collector dashboard for its label, short
 
 No remote production connectivity is assumed just because local tests pass. After pairing a second physical PC, verify its Connected status and a naturally occurring run/finish in the collector. Nothing here drives existing Copilot work to manufacture a result.
 
-### Alternative: file-based pairing (scripted/headless setups)
-
-`New-Reporter.ps1` / `Import-Reporter.ps1` remain available for scripted or headless setups where copying a clipboard string between two interactive desktop sessions isn't practical. They use the same underlying credential/certificate logic as the tray flow above — just packaged as a file instead of a clipboard string.
-
-**On the collector PC**, after `Initialize-Collector.ps1` and starting the collector (`Start-Collector.ps1` or `Start-Tray.ps1 /host`):
-
-```powershell
-.\New-Reporter.ps1 -Name 'Development laptop'
-```
-
-This creates a unique reporter ID and write-only credential, prints a **private pairing-file path under `.local`**, and prints the public certificate SHA256 fingerprint. Transfer that pairing file privately to the intended Windows PC, such as through an approved private channel or encrypted removable media. The file contains a bearer credential and the collector certificate. Do not paste it into chat, a URL, process arguments, browser storage, source control, or logs. Do not transfer the entire `.local` directory.
-
-**On each remote Windows PC**, with the transferred private file at a path you choose:
-
-```powershell
-.\Import-Reporter.ps1 -PairingFile 'C:\PrivateTransfer\pairing-example.json'
-.\Start-Watcher.ps1
-```
-
-Compare the import's printed certificate fingerprint with the collector's fingerprint through your trusted transfer channel. The importer stores the profile under `.local`; keep any transfer copy private and remove it yourself when no longer needed. From here, behavior (connect/baseline/heartbeat/coverage/stop) is identical to the tray flow above.
-
 ### Collector-only and watcher-only operation
 
 | Command | Role |
@@ -118,16 +97,15 @@ Compare the import's printed certificate fingerprint with the collector's finger
 | `.\Start-Collector.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
 | `.\Stop-Collector.ps1` | Stop only the collector; watchers will report unavailable and retry. |
 | `.\Start-Watcher.ps1` / `.\Stop-Watcher.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
-| `.\Start-Monitor.ps1` / `.\Stop-Monitor.ps1` | Backward-compatible alias for `Start-Collector.ps1` / `Stop-Collector.ps1`. `Stop-Monitor.ps1` also stops any leftover watcher from a pre-self-observation install, as a migration safety net. |
 
-The tray and webpage **Stop collector** control stops only the collector. Use `Stop-Monitor.ps1` if you also want to stop a leftover watcher from before self-observation existed. Do not point one checkout's watcher at multiple collectors.
+The tray and webpage **Stop collector** control stops only the collector. Do not point one checkout's watcher at multiple collectors.
 
 For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `configuration.mjs local` plus `Start-Watcher.ps1` pointed at loopback). For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
 
 If local PowerShell script policy blocks execution and your organization's policy permits a one-process override:
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Monitor.ps1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Tray.ps1 /host
 ```
 
 This does not change saved execution policy. Do not bypass an organization's enforced policy.
