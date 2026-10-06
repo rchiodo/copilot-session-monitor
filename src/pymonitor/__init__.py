@@ -17,7 +17,13 @@ port can be reviewed file-by-file against the original implementation:
   watcher.mjs         -> pymonitor/watcher.py
   server.mjs          -> pymonitor/server.py
   actions.mjs         -> pymonitor/actions.py
-  windows/tray.ps1    -> pymonitor/tray.py (native rewrite, not a wrapper)
+  windows/tray.ps1    -> pymonitor/tray_native.py (native rewrite, not a wrapper)
+
+``pymonitor/launcher.py`` has no ``.mjs`` equivalent: it is the testable
+start/stop/live-detection logic absorbed from the PowerShell-only
+``scripts/Start-Role.ps1``/``scripts/Stop-Role.ps1``, which the Node app
+never had a module for. The root-level ``*.py`` PEP 723 scripts (e.g.
+``start-host.py``) are its thin CLI wrappers; see ``docs/porting-notes.md``.
 """
 
 __version__ = "0.1.0"
