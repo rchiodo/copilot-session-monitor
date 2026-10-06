@@ -16,12 +16,19 @@ writing this suite -- see docs/porting-notes.md.
 """
 from __future__ import annotations
 
+import datetime
+import ipaddress
 import json
 import ssl
 from pathlib import Path
 from typing import Any
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs12
+from cryptography.x509.oid import NameOID
 
 from pymonitor import configuration as cfg
 from pymonitor import protocol as proto
@@ -231,6 +238,132 @@ async def test_initialize_refreshes_remote_pairing_certificate_when_token_matche
     await cfg.initialize(LOCAL_IP, 43191, True)
     pairing = await cfg.read_config(pairing_file)
     assert pairing["collectorUrl"] == f"https://{LOCAL_IP}:43191"
+
+
+# --------------------------------------------------------------------------
+# initialize() -- legacy Node/PFX key-recovery migration gap
+# --------------------------------------------------------------------------
+
+
+def _build_legacy_cert_and_key() -> tuple[bytes, bytes, bytes]:
+    """Build a self-signed cert+key pair and export it the way certificate.ps1 did:
+    cert-only PEM (collector-cert.pem) plus a PFX bundling cert+key with an empty
+    password (collector.pfx) -- but, matching the old Node app, no separate PEM key.
+
+    Returns (cert_pem, pfx_bytes, public_key_der) for assertions.
+    """
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Local Copilot Monitor")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=365 * 2))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM)
+    pfx_bytes = pkcs12.serialize_key_and_certificates(
+        name=b"collector",
+        key=key,
+        cert=cert,
+        cas=None,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    public_key_der = key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return cert_pem, pfx_bytes, public_key_der
+
+
+async def _write_legacy_collector_json() -> None:
+    await cfg.save_config("collector.json", _base_collector())
+
+
+async def test_initialize_recovers_key_from_legacy_pfx_preserving_cert() -> None:
+    cert_pem, pfx_bytes, public_key_der = _build_legacy_cert_and_key()
+    await _write_legacy_collector_json()
+    cert_path = cfg.data_dir / "collector-cert.pem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(cert_pem)
+    (cfg.data_dir / "collector.pfx").write_bytes(pfx_bytes)
+
+    await cfg.initialize(LOCAL_IP, 43188, False)
+
+    key_path = cfg.data_dir / "collector-key.pem"
+    assert key_path.exists()
+    # Cert must be byte-for-byte unchanged -- fingerprint preserved, no re-pairing needed.
+    assert cert_path.read_bytes() == cert_pem
+
+    recovered_key = serialization.load_pem_private_key(key_path.read_bytes(), password=None)
+    recovered_public_der = recovered_key.public_key().public_bytes(
+        serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    assert recovered_public_der == public_key_der
+
+    # The recovered pair must actually be usable by ssl.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+
+
+async def test_initialize_falls_back_to_fresh_pair_when_no_legacy_pfx_available() -> None:
+    cert_pem, _pfx_bytes, _public_key_der = _build_legacy_cert_and_key()
+    await _write_legacy_collector_json()
+    cert_path = cfg.data_dir / "collector-cert.pem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(cert_pem)
+    # Deliberately no collector.pfx on disk.
+
+    await cfg.initialize(LOCAL_IP, 43188, False)
+
+    key_path = cfg.data_dir / "collector-key.pem"
+    assert cert_path.exists()
+    assert key_path.exists()
+    # A fresh pair is fine here -- there was nothing recoverable to preserve.
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(certfile=str(cert_path), keyfile=str(key_path))
+
+
+async def test_initialize_is_idempotent_when_both_pem_files_already_exist() -> None:
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    cert_path = cfg.data_dir / "collector-cert.pem"
+    key_path = cfg.data_dir / "collector-key.pem"
+    cert_bytes_before = cert_path.read_bytes()
+    key_bytes_before = key_path.read_bytes()
+
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    await cfg.initialize(LOCAL_IP, 43188, False)
+
+    assert cert_path.read_bytes() == cert_bytes_before
+    assert key_path.read_bytes() == key_bytes_before
+
+
+async def test_initialize_fresh_install_unaffected_by_pfx_recovery_path() -> None:
+    # No collector.json at all -- the ordinary first-run path, untouched by this fix.
+    config = await cfg.initialize(LOCAL_IP, 43188, False)
+    assert config["bindAddress"] == LOCAL_IP
+    assert (cfg.data_dir / "collector-cert.pem").exists()
+    assert (cfg.data_dir / "collector-key.pem").exists()
+    assert not (cfg.data_dir / "collector.pfx").exists()
+
+
+async def test_initialize_reconfigure_true_still_fully_regenerates_despite_recoverable_pfx() -> None:
+    cert_pem, pfx_bytes, _public_key_der = _build_legacy_cert_and_key()
+    await _write_legacy_collector_json()
+    cert_path = cfg.data_dir / "collector-cert.pem"
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    cert_path.write_bytes(cert_pem)
+    (cfg.data_dir / "collector.pfx").write_bytes(pfx_bytes)
+
+    await cfg.initialize(LOCAL_IP, 43188, True)
+
+    # reconfigure=True must still produce a brand-new cert (different fingerprint),
+    # not the recovered/preserved legacy one.
+    assert cert_path.read_bytes() != cert_pem
 
 
 # --------------------------------------------------------------------------

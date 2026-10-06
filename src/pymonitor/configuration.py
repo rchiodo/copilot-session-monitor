@@ -48,6 +48,7 @@ import psutil
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import pkcs12
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from .protocol import (
@@ -177,6 +178,60 @@ def _generate_certificate(bind_address: str) -> None:
         pass
 
 
+_COLLECTOR_PFX_FILE = "collector.pfx"
+
+
+def _extract_key_from_legacy_pfx() -> bytes | None:
+    """Recover the private key from the legacy Node PFX bundle (collector.pfx), if present.
+
+    The old Node implementation exported cert+key together as a PFX with an empty
+    password (see certificate.ps1, deleted; git history at 0771d20~1). Extracting the
+    key from it lets an existing collector-cert.pem (also written by the old app) keep
+    its original fingerprint -- so already-paired remote reporters don't need to
+    re-pair -- while still producing the separate PEM key file that aiohttp's
+    SSLContext.load_cert_chain() requires.
+    """
+    pfx_path = data_dir / _COLLECTOR_PFX_FILE
+    try:
+        pfx_bytes = pfx_path.read_bytes()
+    except OSError:
+        return None
+    try:
+        key, _cert, _chain = pkcs12.load_key_and_certificates(pfx_bytes, password=b"")
+    except Exception:  # noqa: BLE001 - any malformed/incompatible PFX must not crash startup
+        return None
+    if key is None:
+        return None
+    return key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+
+
+def _ensure_certificate(bind_address: str) -> None:
+    """Make sure collector-cert.pem/collector-key.pem both exist. Repairs a key-only
+    migration gap from old Node/PFX installs by recovering the key from collector.pfx
+    (preserving the existing cert/fingerprint) before falling back to generating a
+    brand-new self-signed pair.
+    """
+    cert_path = data_dir / _COLLECTOR_CERT_FILE
+    key_path = data_dir / _COLLECTOR_KEY_FILE
+    if cert_path.exists() and key_path.exists():
+        return
+    if cert_path.exists() and not key_path.exists():
+        recovered_key_pem = _extract_key_from_legacy_pfx()
+        if recovered_key_pem is not None:
+            data_dir.mkdir(parents=True, exist_ok=True)
+            key_path.write_bytes(recovered_key_pem)
+            try:
+                os.chmod(key_path, 0o600)
+            except OSError:
+                pass
+            return
+    _generate_certificate(bind_address)
+
+
 def _fingerprint_sha256(pem_or_der: bytes) -> str:
     """Colon-separated uppercase SHA-256 fingerprint, matching Node's X509Certificate.fingerprint256."""
     if pem_or_der.strip().startswith(b"-----BEGIN"):
@@ -264,7 +319,9 @@ async def initialize(
 ) -> dict[str, Any]:
     existing = await optional_config("collector.json")
     if existing and not reconfigure:
-        return validate_collector(existing)
+        validated = validate_collector(existing)
+        _ensure_certificate(validated["bindAddress"])
+        return validated
     if await optional_config("runtime.json"):
         raise RuntimeError("Stop the collector before initializing or changing its listener")
     addresses = _local_interface_addresses()
