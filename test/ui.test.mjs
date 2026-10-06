@@ -269,7 +269,7 @@ test('an unconfirmed (unknown) session with a dismissKey shows a Dismiss button,
   assert.equal(fixture.requests[0].entries[0].id, 'u1');
 });
 
-test('bulk dismissal sends only visible finished revisions; full dormant descendant names wrap in details', async () => {
+test('bulk dismissal sends only visible dismissable revisions (excludes unconfirmed rows without a key); full dormant descendant names wrap in details', async () => {
   const family = { ...session('finished'), dismissKey: 'a'.repeat(64), members: [session('finished')], childCount: 0,
     relatives: [{ ...session('finished'), depth: 0 },
       { id: 'dormant', title: 'Full dormant child name', state: 'unobserved', detail: 'Execution not observed', depth: 1 },
@@ -287,6 +287,16 @@ test('bulk dismissal sends only visible finished revisions; full dormant descend
   await fixture.nodes.get('clear-finished').handlers.click();
   assert.equal(fixture.requests[0].entries.length, 1);
   assert.equal(fixture.status.sessions[0].state, 'unknown');
+});
+
+test('bulk dismissal (Clear retained) includes unconfirmed rows with a dismissKey, not just finished ones', async () => {
+  const finished = { ...session('finished'), dismissKey: 'a'.repeat(64) };
+  const unconfirmed = { ...session('unknown', 'u1'), dismissKey: 'b'.repeat(64) };
+  const fixture = await page([finished, unconfirmed, session('unknown', 'u2')]);
+  assert.equal(fixture.nodes.get('clear-finished').disabled, false);
+  await fixture.nodes.get('clear-finished').handlers.click();
+  const ids = fixture.requests[0].entries.map(entry => entry.id).sort();
+  assert.deepEqual(ids, ['finished', 'u1']);
 });
 test('responsive column markup and styles allow wrapping and stack on narrow viewports', async () => {
   const [html, css] = await Promise.all(['index.html', 'style.css'].map(file =>

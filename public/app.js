@@ -156,7 +156,7 @@ function render() {
   $('count').textContent = sessions.length;
   $('summary').textContent = `${working} working | ${sessions.length} retained ${state.members ? 'families' : 'sessions'}`;
   $('clear-finished').disabled = !state.healthy || dismissing ||
-    !sessions.some(item => item.state === 'finished' && item.dismissKey);
+    !sessions.some(item => ['finished', 'unknown'].includes(item.state) && item.dismissKey);
   $('coverage').textContent = `${state.healthy ? state.coverage : 'Live source coverage unavailable'} | ${state.machine} | Read-only observation`;
   $('source-health').hidden = !state.sources;
   if (state.sources) {
@@ -263,7 +263,7 @@ async function dismissEntries(entries) {
 }
 
 $('clear-finished').addEventListener('click', () => dismissEntries(state.sessions
-  .filter(item => item.state === 'finished' && item.dismissKey).map(item => ({ id: item.id, key: item.dismissKey }))));
+  .filter(item => ['finished', 'unknown'].includes(item.state) && item.dismissKey).map(item => ({ id: item.id, key: item.dismissKey }))));
 
 $('test').addEventListener('click', async () => {
   $('test').disabled = true;
