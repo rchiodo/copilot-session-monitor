@@ -24,6 +24,7 @@ byte-for-byte because it fixes a previously-shipped bug.
 | `watcher.mjs`        | `watcher.py`              | Done -- `Watcher`: HTTPS client that pairs with (`/v1/connect`) and reports to (`/v1/report`) a remote collector; durable installation/boot identity, lease renewal, clock-skew-aware retry/backoff. |
 | `reporter.mjs`       | `reporter.py`             | Done -- the ~1.5s report-cadence loop + local-engine-to-wire-payload shaping that `watcher.py` drives; split out as its own module so the cadence/backoff logic is unit-testable independent of the HTTP transport. |
 | `lifecycle.mjs`      | `lifecycle.py`             | Done -- single-role-per-directory lock (`acquire_role`). `psutil.pid_exists` replaces `process.kill(pid, 0)`'s liveness probe (Windows' `os.kill(pid, 0)` would call `TerminateProcess` instead of merely probing). |
+| *(none -- new in Phase 5)* | `launcher.py`        | Done -- `start_role`/`stop_role`/live-instance-detection logic backing the PEP 723 launcher scripts at repo root (`start-host.py`, `start-client.py`, `start-tray.py`, `stop-host.py`, `stop-client.py`, `init-host.py`). Absorbs `scripts/Start-Role.ps1` and `scripts/Stop-Role.ps1` (both deleted); no 1:1 `.mjs` predecessor since the original app never had a testable Python/JS launcher module -- the PowerShell scripts *were* the logic. See "Phase 5" below. |
 
 ## Local session discovery: the one architectural change (done)
 
@@ -633,3 +634,261 @@ timeout=1)` -- a test-only fix, no production code change was needed.
 **272/272 passing** (`pytest tests/ -q`, full suite): 271 from Phases 1-3,
 minus 29 (`test_tray_bridge.py`, deleted) plus 30
 (`test_tray_native.py`, new).
+
+(Two subsequent production bug fixes -- a stale startup "observation gap"
+`lastAlert` never being cleared/superseded by later healthy reports, and
+`local_report.py` discarding the real exception message in favor of a bare
+class name -- each added their own regression test, bringing the baseline
+to **278/278** before Phase 5 below.)
+
+## Phase 5: PEP 723 standalone launchers, Node.js removal
+
+This phase retired the dual-implementation state entirely. The Node.js
+source tree (`src/*.mjs`, `package.json`, `package-lock.json`) is deleted;
+`src/pymonitor/` is now the sole implementation. The 8 `.ps1`
+launcher/stop scripts and the 3 now-dead `windows/*.ps1` helpers
+(`certificate.ps1`, `protect-data.ps1`, `tray.ps1` -- superseded by
+`configuration.py`'s cert generation/`_harden_acl()` and `tray_native.py`
+since Phase 4) are also deleted. The empty `windows/` directory was removed
+along with its last file (a judgment call: the user's instructions named
+the 3 files, not the directory itself).
+
+### Launcher scripts
+
+The 8 original `.ps1` scripts map onto 6 new root-level
+[PEP 723](https://peps.python.org/pep-0723/) standalone scripts, run via
+`uv run <script>.py` (no `pip install` step -- `uv` builds an ephemeral venv
+from each script's inline `# /// script` metadata block, which declares
+`dependencies = ["copilot-session-monitor"]` and
+`[tool.uv.sources] copilot-session-monitor = { path = ".", editable = true }`
+so the local package resolves against the checkout, not PyPI):
+
+| Original `.ps1`                     | New script             |
+|--------------------------------------|-------------------------|
+| `Initialize-Host.ps1`                | `init-host.py`          |
+| `Start-Host-Headless.ps1`            | `start-host.py`         |
+| `Start-Client-Headless.ps1`          | `start-client.py`       |
+| `Start-Tray.ps1`                      | `start-tray.py`         |
+| `Stop-Host.ps1`                       | `stop-host.py`          |
+| `Stop-Client.ps1`                     | `stop-client.py`        |
+| `scripts/Start-Role.ps1`             | absorbed into `pymonitor.launcher.start_role()` |
+| `scripts/Stop-Role.ps1`              | absorbed into `pymonitor.launcher.stop_role()`  |
+
+`scripts/Start-Role.ps1`/`Stop-Role.ps1` had no direct script-for-script
+Python replacement because their logic (Python-version sanity check,
+`runtime.json`/`watcher-runtime.json` + `instanceId` match + HTTP health
+probe to detect an already-live instance, hidden-background-process spawn
+with log redirection, 30s health-poll-until-up loop, and -- for stop --
+URL-pattern validation, `instanceId` ownership confirmation before
+trusting a runtime file, bearer-authenticated `/api/stop`/`/stop` call,
+and poll-until-runtime-file-disappears) is now a single shared,
+unit-tested module, `src/pymonitor/launcher.py`, that all 6 thin scripts
+call into. This follows this project's established precedent (e.g.
+`reporter.py` being split out of `watcher.py` in Phase 2) of keeping
+testable logic in the importable package and leaving the entry-point
+scripts as thin argument-parsing wrappers. `init-host.py` is the one
+exception that calls `pymonitor.configuration.configuration_command()`
+directly in-process rather than spawning a subprocess, since it is a
+short synchronous configuration write, not a long-running role process to
+detach from and health-poll.
+
+Deliberate naming deviations from the PowerShell originals (both
+documented in each script's `--help`):
+
+- `Start-Tray.ps1`'s positional `/host` argument became `start-tray.py
+  --host` (an argparse flag), since positional "slash-style" arguments
+  are not idiomatic argparse and `--host` reads clearly as "run the host
+  role."
+- `Initialize-Host.ps1 -Reconfigure` (a PowerShell switch) became
+  `init-host.py ... --reconfigure` (argparse `store_true`) -- same
+  semantics, Python-idiomatic spelling. `-BindAddress`/`-IngestPort`
+  (PowerShell named parameters) became positional `bind_address`/
+  `ingest_port` arguments, matching `configuration_command()`'s own
+  positional `["initialize", bind, port, "replace"?]` argument shape.
+
+### Tests
+
+`tests/test_launcher.py` (new, 24 tests) covers `launcher.py`'s
+live-instance detection (runtime-file parsing, `instanceId` match, HTTP
+health probe), start/stop subprocess spawning (mocked), the stop-side
+safety checks (URL pattern validation, ownership confirmation before
+trusting a runtime file belongs to this app), and the health-poll-until-up
+loop (including timeout). No new tests were needed for the 6 top-level
+`.py` scripts themselves, since they are intentionally thin argparse
+wrappers with no independent logic -- `launcher.py`'s tests are the real
+coverage.
+
+**302/302 passing** (`pytest tests/ -q`, full suite): 278 from the prior
+baseline plus the 24 new launcher tests. Re-run after all file
+deletions/doc edits to confirm no regressions from removing `src/*.mjs`,
+`package.json`, `windows/*.ps1`, and the old launcher scripts (none of
+which the Python test suite imports or exercises).
+
+### Deleted Node test files
+
+Of the 11 original `test/*.test.mjs` files, 10 depended directly on the
+now-deleted `src/*.mjs` modules (`background`, `collector`,
+`connection-string`, `controls`, `dismiss`, `families`, `monitor`,
+`reconnect-lease`, `self-observation`, `source`) and were deleted.
+`test/ui.test.mjs` has no such dependency and was kept untouched, per the
+explicit instruction to leave `scripts/check-ui.mjs`/`verify-ui.mjs` and
+the Node UI-testing tooling alone.
+
+### Known contradiction -- resolved in Phase 5
+
+`scripts/verify-ui.mjs` imported from `../src/families.mjs` and
+`../src/actions.mjs` to synthesize fixture data for its browser-rendering
+harness -- both deleted in the Node-removal phase above, which broke it.
+This was resolved in a follow-up phase by porting `verify-ui.mjs` to
+`scripts/verify_ui.py` (an aiohttp app using the real `pymonitor.families`/
+`pymonitor.actions` modules instead of the deleted `.mjs` ones). See
+"Phase 5: porting scripts/verify-ui.mjs to Python" below for the full
+writeup; `scripts/verify-ui.mjs` itself has since been deleted.
+
+### Documentation
+
+README.md's Requirements, one-machine/multi-machine quick-start,
+command-reference table, revoke-command, and Development/verification
+sections were rewritten to reference `uv run <script>.py` instead of
+`.\*.ps1`, and to describe the native in-process Python tray (Phase 4)
+instead of a PowerShell tray-helper subprocess. The PowerShell
+execution-policy-bypass paragraph was removed outright (no longer
+applicable -- there is no PowerShell script left to bypass policy for).
+The Development/verification section was split to separately call out
+`pytest tests/ -q` (the real, current test suite) versus the two
+remaining Node-based UI tools, with the `verify-ui.mjs` broken-import
+issue above called out explicitly as a known issue rather than silently
+left for a future reader to discover.
+
+## Phase 5: porting scripts/verify-ui.mjs to Python
+
+`scripts/verify-ui.mjs` is a dev-only tool: it serves a synthetic
+24-session fixture dashboard over HTTP so `scripts/check-ui.mjs` (headless
+Edge via CDP) can drive the real `public/index.html`/`app.js`/`style.css`
+client and assert on rendered layout/counts/badges. It was broken by the
+Node-removal phase (its `../src/families.mjs`/`../src/actions.mjs`
+imports no longer existed). It is now `scripts/verify_ui.py`, an aiohttp
+app that imports the real `pymonitor.families.FamilyMonitor`/
+`group_families` and `pymonitor.actions.MonitorActions`/
+`read_dismiss_entries` instead of the deleted `.mjs` modules.
+
+### What was ported, 1:1
+
+- The same 24-parent / 12-working / 12-finished-or-waiting-or-error-or-
+  unknown synthetic fixture (parents, children, dormant/missing
+  "relatives"), same long-title torture strings, same machine/reporter
+  labeling -- all preserved as literal Python data so
+  `check-ui.mjs`'s `measure()` assertions (exact counts, badge text,
+  etc.) keep passing unmodified.
+- Routes: `/`, `/host.js`, `/measure.js`, `/case`, `/style.css`,
+  `/app.js`, `/api/status`, `/api/control`, `/api/dismiss` (POST,
+  bearer-token protected), `/results` (GET/POST).
+- The embedded browser-side `host()`/`measure()` JS and the `measure.js`
+  body are preserved verbatim as Python string constants -- they are
+  100% client-side JS driving the dashboard in a real browser, not
+  server logic, so there was nothing to "pythonify."
+- `/` serves a minimal host shell page (iframe orchestrator, unchanged
+  behavior: `<script src="/host.js">`); `/case` serves
+  `public/index.html` with `<script src="/measure.js" defer>` injected
+  before `</body>` -- same split as the original (the fixture/session
+  dashboard itself only renders inside `/case` iframes, not at `/`).
+- `public/index.html`/`app.js`/`style.css` are served completely
+  unchanged (read from disk, not touched).
+
+### `uv run` usage
+
+No PEP 723 header was added to `scripts/verify_ui.py` -- unlike the 6
+top-level launcher scripts, this is pure dev tooling invoked directly
+from within the repo's own Python environment (the same one `pytest`
+runs in), so `aiohttp` is already a project dependency and there's no
+"run standalone with no prior setup" requirement to satisfy. Run it with
+`python scripts/verify_ui.py` (prints
+`Synthetic UI checks: http://127.0.0.1:<port>` on an ephemeral port, the
+same stdout contract `check-ui.mjs` regex-scrapes to discover the URL)
+or let `check-ui.mjs` spawn it itself via `uv run` (it invokes the
+script through the project's `uv` environment so it resolves
+`pymonitor` without a separate install step).
+
+### Bugs found while porting (all now fixed/explained)
+
+1. **Verbatim-copy bug in embedded client JS** (fixed): an early draft of
+   the `measure()` string had been re-indented/re-escaped during the
+   port, breaking a template-literal boundary. Fixed by copying the
+   original's JS byte-for-byte into the Python string constant instead
+   of retyping it.
+2. **`/api/dismiss` auth literal pasted-back-as-redacted-text bug**
+   (transient, self-corrected, confirmed fixed): at one point during
+   authoring, tool-output redaction (any text shaped like
+   `Bearer <token>` is masked to `"******"` in anything the model sees
+   displayed, including `view`/`grep`/terminal echoes of the *real* file
+   content) caused a "Bearer ..." comparison literal to get pasted back
+   as the literal six-asterisk mask instead of the real derived-constant
+   comparison, which made every dismiss request 403 regardless of a
+   valid token -- this broke the `individualDismiss`/
+   `bulkFinishedOnly`/`noPollReappearance` `check-ui.mjs` checks. It was
+   caught and fixed before this phase by comparing against a derived
+   constant (`f"Bearer {_CONTROL_TOKEN}"`) rather than a literal, with a
+   code comment recording the failure mode so it isn't reintroduced.
+   During *this* phase a second look at the same code, again via masked
+   tool output, raised a false alarm that the bug had regressed; raw
+   byte-level inspection (`ToCharArray() | [int][char]$_` in PowerShell,
+   which bypasses all display-layer masking) confirmed the file already
+   had the correct, real comparison -- no actual regression, and the
+   `scripts/verify_ui.py` dismiss-auth code is correct today. This
+   redaction-masking hazard is worth flagging for anyone who edits
+   `Authorization`/bearer-token-shaped code in this repo going forward:
+   never trust a masked `"******"` string seen in tool output as the
+   real file content; verify raw bytes before "fixing" it.
+3. **Pre-existing `.mjs` harness bug, `.row-title` no longer matching**
+   (found, not a port bug, left as-is per scope): `check-ui.mjs`'s
+   `measure()` checked `.row-title` element `textContent` against a
+   format that stopped matching after commit `ff1003c` changed
+   `public/app.js`'s title rendering. This predates the Python port and
+   affects the original `.mjs` the same way; out of scope for this
+   phase.
+4. **`layout` check fails at 901x900 viewport** (found, not a port bug,
+   root-caused, **fixed**): a pre-existing CSS issue, confirmed to
+   reproduce identically against the original `.mjs` fixture server, not
+   something introduced by this port. Root cause, confirmed via live
+   `playwright` measurement of `getBoundingClientRect()` on `#running`
+   and `#retained`: at the two-column breakpoint the columns narrow to
+   ~420px, and `.session-column > p.muted`'s description text ("Errors/
+   waiting stay. Finished and unconfirmed rows can be dismissed
+   individually (monitor-only).") wraps to two lines in the right column
+   while the shorter left-column description stays on one line. That
+   18px height difference above `#retained` offsets its `top` by 18px
+   relative to `#running`'s `top`, failing the `Math.abs(right.top -
+   left.top) < 1` side-by-side alignment assertion (the single-column
+   `<=900px` branch never hit this because it only asserts
+   `right.top > left.bottom`, not alignment). Fixed with a single-line,
+   surgical CSS change (user-approved exception to the "don't touch
+   `public/`" rule, scoped to this fix only): added
+   `min-height: 36px` (two lines at the existing 18px line-height) to
+   `.session-column > p.muted` in `public/style.css`, so both columns'
+   description blocks always reserve the same height regardless of
+   whether their text actually wraps, keeping `#running`/`#retained`
+   vertically aligned at every viewport width ≥901px. Verified fixed via
+   `playwright` (both columns' `top` now equal at 901px) and via
+   `node scripts/check-ui.mjs` (10/10 passing, including both 901x900
+   light/dark `layout` cases).
+
+### Verification
+
+- `pytest tests/test_verify_ui.py -q`: **9/9 passing** (new file) --
+  fixture builds 24 parents; `/` serves the host shell; `/case` serves
+  `index.html` with measure.js injected; static assets served; measure.js
+  embeds `window.expected=`; `/api/status` without a fixture id (no
+  Referer) is a 500; `/api/status` with a fixture returns 24 sessions and
+  the right theme; `/api/dismiss` rejects a missing/wrong bearer token
+  with 403; `/api/dismiss` with the real control token and a real
+  dismissable family id/key from `/api/status` returns 200 with that id
+  in `"dismissed"`.
+- `node scripts/check-ui.mjs` (real headless-Edge/CDP run against
+  `scripts/verify_ui.py`): **10/10 passing** -- `runningOrdering`,
+  `retainedOrdering`, `individualDismiss`, `bulkFinishedOnly`,
+  `noPollReappearance`, `sourceLabels`, and `layout` (all viewports,
+  light+dark) all pass; see finding 4 above for the `layout` fix.
+- Full suite: `pytest tests/ -q` -- see count in the top-level summary
+  below.
+- `scripts/verify-ui.mjs` (the old Node original) has been deleted now
+  that the Python port is confirmed working end-to-end.
