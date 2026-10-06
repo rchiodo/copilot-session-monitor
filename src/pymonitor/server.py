@@ -37,6 +37,7 @@ from .collector import Collector
 from .configuration import (
     data_dir,
     ensure_local_reporter,
+    initialize,
     load_collector,
     migrate_legacy,
     pair_connection_string,
@@ -243,7 +244,12 @@ class CollectorServer:
     async def start(self) -> None:
         data_dir.mkdir(parents=True, exist_ok=True)
         self._release = await acquire_role(data_dir, "collector")
-        self.config = await load_collector()
+        # Bootstraps a fresh install (first-run config + certs) and repairs a
+        # missing collector-key.pem on an already-configured install (e.g. a
+        # legacy Node/PFX migration), rather than requiring a separate
+        # `init-host.py` run first. init-host.py remains the path for
+        # choosing a non-default bind address or forcing --reconfigure.
+        self.config = await initialize()
         self.local_reporter_id = await ensure_local_reporter(self.config) if _SELF_OBSERVE else None
         collector_file = str(data_dir / "collector-state.json")
         await migrate_legacy(self.config, collector_file)

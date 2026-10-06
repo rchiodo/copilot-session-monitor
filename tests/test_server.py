@@ -36,6 +36,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+import pymonitor.server as server_module
 from pymonitor.actions import MonitorActions
 from pymonitor.collector import Collector
 from pymonitor.engine import Ledger
@@ -302,3 +303,46 @@ async def test_dashboard_serves_index_html(dashboard) -> None:
     assert resp.headers["Cache-Control"] == "no-store"
     text = await resp.text()
     assert "<html" in text.lower()
+
+
+# -- start() configuration bootstrap ---------------------------------------
+#
+# Scoped per this file's docstring: start() itself (real TLS listeners,
+# on-disk certs/config, the role lock, the local-poll loop) is out of scope
+# for an end-to-end test here. This narrowly proves the one call-site swap:
+# start() must bootstrap its config via `configuration.initialize()` (which
+# creates a fresh install or repairs a missing collector-key.pem from a
+# legacy PFX) rather than `load_collector()` (read+validate only, which
+# would raise/crash on a missing config or missing certs). Everything past
+# that point is short-circuited via a sentinel exception so the test never
+# touches the real role lock, TLS, or local-poll machinery.
+
+
+class _StoppedAfterInitialize(Exception):
+    """Sentinel raised immediately after start() calls ensure_local_reporter,
+    i.e. right after the config-bootstrap line under test, so the rest of
+    start()'s real role-lock/TLS/local-poll machinery is never reached."""
+
+
+async def test_start_bootstraps_config_via_initialize_not_load_collector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server = CollectorServer(bridge=None)
+    monkeypatch.setattr(server_module, "data_dir", tmp_path)
+    monkeypatch.setattr(server_module, "acquire_role", AsyncMock(return_value=AsyncMock()))
+
+    expected_config = _config()
+    initialize_mock = AsyncMock(return_value=expected_config)
+    monkeypatch.setattr(server_module, "initialize", initialize_mock)
+    monkeypatch.setattr(
+        server_module,
+        "load_collector",
+        AsyncMock(side_effect=AssertionError("start() must bootstrap via initialize(), not load_collector()")),
+    )
+    monkeypatch.setattr(server_module, "ensure_local_reporter", AsyncMock(side_effect=_StoppedAfterInitialize()))
+
+    with pytest.raises(_StoppedAfterInitialize):
+        await server.start()
+
+    initialize_mock.assert_awaited_once_with()
+    assert server.config == expected_config
