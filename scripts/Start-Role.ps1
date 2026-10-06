@@ -2,8 +2,9 @@ param([ValidateSet('collector','watcher')][string]$Role, [switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 $data = if ($env:MONITOR_DATA_DIR) { $env:MONITOR_DATA_DIR } else { Join-Path $root '.local' }
-$node = (Get-Command node -ErrorAction Stop).Source
-if ([int]((& $node --version) -replace '^v(\d+).*$', '$1') -lt 24) { throw 'Node.js 24 or newer is required. No npm install is needed.' }
+$python = (Get-Command python -ErrorAction Stop).Source
+$pyVersion = & $python -c "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"
+if ([version]$pyVersion -lt [version]'3.11') { throw 'Python 3.11 or newer is required. Install with: pip install -e .' }
 $runtimeFile = if ($Role -eq 'collector') { 'runtime.json' } else { 'watcher-runtime.json' }
 $endpoint = if ($Role -eq 'collector') { '/api/status' } else { '/status' }
 $runtimePath = Join-Path $data $runtimeFile
@@ -21,8 +22,8 @@ function Get-LiveRole {
 $runtime = Get-LiveRole
 if (-not $runtime) {
     [void](New-Item -ItemType Directory -Path $data -Force)
-    $entry = if ($Role -eq 'collector') { 'server.mjs' } else { 'watcher.mjs' }
-    $process = Start-Process -FilePath $node -ArgumentList @('--disable-warning=ExperimentalWarning', "`"$(Join-Path $root "src\$entry")`"") `
+    $entry = if ($Role -eq 'collector') { 'host' } else { 'client' }
+    $process = Start-Process -FilePath $python -ArgumentList @('-m', 'pymonitor.cli', $entry) `
         -WorkingDirectory $root -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $data "$Role.log") -RedirectStandardError (Join-Path $data "$Role-error.log")
     for ($i = 0; $i -lt 60; $i++) {

@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copilot-session-monitor"
+version = "0.1.0"
+description = "Ambient Copilot session status monitor (tray + loopback dashboard + multi-machine watcher protocol)"
+requires-python = ">=3.11"
+readme = "README.md"
+dependencies = [
+  # Official Copilot SDK: used ONLY for local session discovery metadata
+  # (list_sessions/get_session_metadata) -- family/hierarchy linkage and
+  # per-event status detail remain direct ~/.copilot reads (data.db / events.jsonl),
+  # since the SDK has no hierarchy or live busy/idle event surface. See
+  # docs/porting-notes.md for the exact boundary.
+  "github-copilot-sdk==1.0.15",
+  # Async HTTP (server + client) for the dashboard/ingestion/control servers and the
+  # outbound reporter client: chosen over stdlib http.server because the collector
+  # needs several concurrent listeners (loopback dashboard + 1-2 TLS ingestion binds)
+  # plus an outbound client, all cooperating through a single asyncio.Lock-serialized
+  # action queue (actions.py) -- a natural fit for asyncio, awkward with threaded
+  # http.server. See docs/porting-notes.md for the full Phase 2 decision record.
+  "aiohttp>=3.9",
+  "psutil>=6.0",
+  # Windows-only SID/DACL calls in configuration.py (protect_data), plus the
+  # Phase 4 native tray's WM_POWERBROADCAST window and clipboard write
+  # (tray_native.py) -- see docs/porting-notes.md.
+  "pywin32>=306; sys_platform == 'win32'",
+  "cryptography>=42",
+  # Phase 4: native in-process tray icon/menu (replaces spawning
+  # windows/tray.ps1 as a subprocess -- see tray_native.py and
+  # docs/porting-notes.md for the full rationale).
+  "pystray>=0.19",
+  "Pillow>=10",
+  # Native Windows toast notifications (replaces WinForms NotifyIcon
+  # balloon tips). winotify is a documented, easy swap-in alternative (see
+  # docs/porting-notes.md) but is not wired up as a coded runtime fallback.
+  "win11toast>=0.33",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+pymonitor-host = "pymonitor.cli:host_main"
+pymonitor-client = "pymonitor.cli:client_main"
+pymonitor-config = "pymonitor.cli:config_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
