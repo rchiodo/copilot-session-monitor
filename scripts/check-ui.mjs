@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
 import { mkdtemp, readFile, rm, access } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -8,6 +8,26 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const profile = await mkdtemp(path.join(os.tmpdir(), 'monitor-browser-fixture-'));
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
+// `child.kill()` only signals the immediate child PID. On Windows, `uv run`
+// spawns at least one grandchild Python interpreter (and sometimes a
+// great-grandchild, when the cached venv's Scripts\python.exe is itself a
+// stub that re-execs the base interpreter). Those descendants are NOT
+// terminated by `child.kill()` -- they get reparented and keep running as
+// orphans, and because they inherit this process's stdout/stderr pipe
+// handles, their continued existence can keep those streams open and
+// prevent this script from ever exiting naturally. `taskkill /T /F` kills
+// the full process tree rooted at the given PID instead of just the one
+// process.
+function killTree(child) {
+  if (!child || child.exitCode !== null) return Promise.resolve();
+  if (process.platform === 'win32') {
+    return new Promise(resolve => {
+      execFile('taskkill', ['/PID', String(child.pid), '/T', '/F'], () => resolve());
+    });
+  }
+  child.kill();
+  return Promise.resolve();
+}
 let browser, fixture, socket;
 const pending = new Map();
 let nextId = 0;
@@ -20,7 +40,7 @@ function call(method, params = {}) {
   });
 }
 try {
-  fixture = spawn(process.execPath, [path.join(root, 'scripts', 'verify-ui.mjs')], { cwd: root, windowsHide: true });
+  fixture = spawn('uv', ['run', path.join(root, 'scripts', 'verify_ui.py')], { cwd: root, windowsHide: true });
   fixture.stderr.pipe(process.stderr);
   const url = await new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Fixture startup timed out')), 10000);
@@ -58,7 +78,11 @@ try {
   await call('Emulation.setDeviceMetricsOverride', { width: 1200, height: 900, deviceScaleFactor: 1, mobile: false });
   await call('Page.navigate', { url });
   let results = [];
-  for (let attempt = 0; attempt < 120 && results.length < 10; attempt++) {
+  // measure()'s own pacing (several `wait(1900)` calls per case, run
+  // sequentially by host.js's one-iframe-at-a-time next()) costs roughly
+  // 20-22s per viewport/theme combination; 10 combinations need up to ~220s,
+  // so the poll budget here is generous beyond the prior 180s ceiling.
+  for (let attempt = 0; attempt < 220 && results.length < 10; attempt++) {
     await pause(1500);
     results = await (await fetch(`${url}/results`)).json();
   }
@@ -89,11 +113,15 @@ try {
   if (socket?.readyState === WebSocket.OPEN) await call('Browser.close');
   if (browser) {
     for (let i = 0; i < 50 && browser.exitCode === null; i++) await pause(100);
-    if (browser.exitCode === null) browser.kill();
+    if (browser.exitCode === null) {
+      const exited = new Promise(resolve => browser.once('exit', resolve));
+      await killTree(browser);
+      await exited;
+    }
   }
   if (fixture && fixture.exitCode === null) {
     const exited = new Promise(resolve => fixture.once('exit', resolve));
-    fixture.kill();
+    await killTree(fixture);
     await exited;
   }
   await pause(1000);

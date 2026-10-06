@@ -2,7 +2,7 @@
 
 A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and receives native notifications. The collector automatically observes its own machine's Copilot sessions — no separate local watcher needed. A watcher is only required on each *additional* PC whose sessions you want to see on the collector's dashboard.
 
-The multi-machine changes are currently a working-tree implementation; use this same version on every PC. A previously published version may support only one machine. There are no npm dependencies, cloud relay, accounts, service installation, or automatic startup registration.
+The multi-machine changes are currently a working-tree implementation; use this same version on every PC. A previously published version may support only one machine. There is no cloud relay, accounts, service installation, or automatic startup registration.
 
 ## Components
 
@@ -18,12 +18,12 @@ flowchart LR
 - **Collector self-observation:** the collector polls its own machine's Copilot sessions directly in-process (the same cadence/logic as a watcher, reused internally) and feeds them into its own pipeline under a fixed, built-in local reporter identity. No separate watcher process, pairing step, or network hop is needed for the collector's own machine. Set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable this and go back to requiring an explicit local watcher instead.
 - **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage or completion-notification tray, and needs no chat/model running. It does show a small tray icon with a **"Connect to host..."** menu for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
 - **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the notification tray — including a **"Generate connection request for a sub machine..."** menu item for pairing new watchers. It never opens a remote Copilot database or filesystem.
-- These are **two logical roles**, not a promise of two OS PIDs. Each Node process has a Windows PowerShell helper that also renders that role's tray icon and menu. The watcher's helper supplies process/power evidence and the pairing dialog; the collector's helper supplies Windows theme, power events, notifications, and the connection-string generator.
+- These are **two logical roles**, not a promise of two OS PIDs. Each role is a single Python process with an in-process native tray icon and menu (no separate PowerShell helper process). The watcher's tray supplies process/power evidence and the pairing dialog; the collector's tray supplies Windows theme, power events, notifications, and the connection-string generator.
 
 ## Requirements
 
-- Windows 10/11 with Windows PowerShell and a current .NET Framework; the collector needs an interactive Windows desktop for tray notifications.
-- [Node.js](https://nodejs.org/) **24 or newer**, on `PATH`. **No `npm install` is needed.**
+- Windows 10/11; the collector needs an interactive Windows desktop for tray notifications.
+- [`uv`](https://docs.astral.sh/uv/) on `PATH`, which manages the Python 3.11+ interpreter and dependencies automatically — **no separate `pip install` step is needed.** `uv run <script>.py` installs this project (editable) into an ephemeral virtual environment on first use.
 - Each watcher needs a supported local Copilot installation writing `%USERPROFILE%\.copilot`. The source adapter was verified against desktop 1.1.24 / CLI 1.0.90-0 and is undocumented/version-sensitive.
 - A current Edge/Chromium browser on the collector PC.
 - For multiple PCs: an existing LAN/private VPN route and permission to receive TCP on the selected collector interface/ingestion port. This app does not set up a VPN or change firewall rules.
@@ -35,21 +35,21 @@ Obtain the source, then run in PowerShell from its directory:
 ```powershell
 git clone https://github.com/rchiodo/copilot-session-monitor.git
 cd .\copilot-session-monitor
-.\Start-Tray.ps1 /host
+uv run start-tray.py --host
 ```
 
 For unreleased changes, copy the working source to another PC **without `.local`, `.git`, or generated evidence** rather than assuming GitHub already contains those changes.
 
-`Start-Tray.ps1 /host` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
+`uv run start-tray.py --host` prepares an app-local certificate, then starts the collector, which immediately shows this machine's own Copilot sessions (self-observed in-process — no separate watcher to start or pair). The webpage remains **http://127.0.0.1:43187**. HTTPS reporting uses **127.0.0.1:43188** by default; no LAN interface is opened. Existing instances are reused.
 
 ```powershell
-.\Start-Host-Headless.ps1 -NoBrowser
-.\Stop-Host.ps1
+uv run start-host.py --no-browser
+uv run stop-host.py
 ```
 
-Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `Stop-Host.ps1` stops the collector, never Copilot sessions.
+Closing the browser, terminal, or Copilot chat does not stop the collector. Start again after signing in/rebooting. `stop-host.py` stops the collector, never Copilot sessions.
 
-An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`.\Stop-Client.ps1`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
+An existing single-machine installation from before this version migrates automatically the first time the collector starts with self-observation enabled (the default). It makes a narrowly scoped `.local\backup-<timestamp>` of the monitor's old session and notification stores, preserves the notification ledger (no replayed/duplicate alerts), and namespaces records under a stable local reporter identity — reusing any prior local watcher's identity file if present, so restarts don't appear as a new machine. A session row from the old store that can't be freshly reconfirmed on the very next poll surfaces once as **unconfirmed**, never silently dropped or duplicated. Original legacy files remain untouched. No Copilot data is migrated or changed. If you still have a separate local watcher running from a prior version, stop it (`uv run stop-client.py`) before restarting the collector, to avoid two processes reporting under the same local identity at once.
 
 ## Multiple-machine setup
 
@@ -62,9 +62,9 @@ This is a Live-Share-style pairing flow: generate a one-time connection string o
 **On the collector PC**, stop the local roles, opt into a private interface, then start the tray app in host mode:
 
 ```powershell
-.\Stop-Host.ps1
-.\Initialize-Host.ps1 -BindAddress 192.168.1.20 -IngestPort 43188 -Reconfigure
-.\Start-Tray.ps1 /host
+uv run stop-host.py
+uv run init-host.py 192.168.1.20 43188 --reconfigure
+uv run start-tray.py --host
 ```
 
 This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
@@ -74,7 +74,7 @@ Right-click the collector's tray icon and choose **"Generate connection request 
 **On each remote Windows PC**, with the source checked out, start the tray app in its default child/watcher mode:
 
 ```powershell
-.\Start-Tray.ps1
+uv run start-tray.py
 ```
 
 Right-click its tray icon, choose **"Connect to host..."**, paste the connection string into the dialog, and click OK. The watcher validates the string (rejecting malformed or wrong-version input with a clear error dialog instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. A confirmation toast shows the host address and reporter label.
@@ -82,7 +82,7 @@ Right-click its tray icon, choose **"Connect to host..."**, paste the connection
 Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Native notifications appear **only on the collector PC**. To stop that source watcher, use its tray icon's **"Stop watcher"** item or:
 
 ```powershell
-.\Stop-Client.ps1
+uv run stop-client.py
 ```
 
 No remote production connectivity is assumed just because local tests pass. After pairing a second physical PC, verify its Connected status and a naturally occurring run/finish in the collector. Nothing here drives existing Copilot work to manufacture a result.
@@ -91,24 +91,16 @@ No remote production connectivity is assumed just because local tests pass. Afte
 
 | Command | Role |
 | --- | --- |
-| `.\Start-Tray.ps1 /host` | Recommended host entry point: identical to `Start-Host-Headless.ps1`, with a tray icon offering "Generate connection request...". |
-| `.\Start-Tray.ps1` (no args) | Recommended child entry point: identical to `Start-Client-Headless.ps1`, with a tray icon offering "Connect to host...". |
-| `.\Initialize-Host.ps1` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
-| `.\Start-Host-Headless.ps1 -NoBrowser` | Start only the collector; no local Copilot installation is required. |
-| `.\Stop-Host.ps1` | Stop only the collector; watchers will report unavailable and retry. |
-| `.\Start-Client-Headless.ps1` / `.\Stop-Client.ps1` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
+| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`, with a tray icon offering "Generate connection request...". |
+| `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`, with a tray icon offering "Connect to host...". |
+| `uv run init-host.py` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
+| `uv run start-host.py --no-browser` | Start only the collector; no local Copilot installation is required. |
+| `uv run stop-host.py` | Stop only the collector; watchers will report unavailable and retry. |
+| `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
 
 The tray and webpage **Stop collector** control stops only the collector. Do not point one checkout's watcher at multiple collectors.
 
-For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `configuration.mjs local` plus `Start-Client-Headless.ps1` pointed at loopback). For foreground diagnostics after configuration, `npm start` runs the collector; `node .\src\watcher.mjs` runs the watcher. Stop foreground processes with Ctrl+C.
-
-If local PowerShell script policy blocks execution and your organization's policy permits a one-process override:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\Start-Tray.ps1 /host
-```
-
-This does not change saved execution policy. Do not bypass an organization's enforced policy.
+For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `python -m pymonitor.cli config local` plus `uv run start-client.py` pointed at loopback). For foreground diagnostics after configuration, `uv run start-host.py` runs the collector; `uv run start-client.py` runs the watcher. Stop foreground processes with Ctrl+C.
 
 ## Trust, credentials, and network boundaries
 
@@ -122,10 +114,10 @@ This does not change saved execution policy. Do not bypass an organization's enf
 To revoke a remote credential on the collector, use its reporter ID from the private pairing file or dashboard details:
 
 ```powershell
-node .\src\configuration.mjs revoke REPORTER-ID
+python -m pymonitor.cli config revoke REPORTER-ID
 ```
 
-Revocation preserves retained metadata but makes that source unavailable. It does not delete Copilot work. To rotate the certificate or change the listening IP, stop the collector and use `Initialize-Host.ps1 ... -Reconfigure`. The local profile and retained exported pairing files are updated. Stop remote watchers and re-import their updated **same-identity** pairing files through the trusted channel before restarting. Certificates expire after two years; they are not silently renewed or trusted. Keep private pairing/identity backups; a new pairing is a distinct source, not a hostname-based merge.
+Revocation preserves retained metadata but makes that source unavailable. It does not delete Copilot work. To rotate the certificate or change the listening IP, stop the collector and use `uv run init-host.py ... --reconfigure`. The local profile and retained exported pairing files are updated. Stop remote watchers and re-import their updated **same-identity** pairing files through the trusted channel before restarting. Certificates expire after two years; they are not silently renewed or trusted. Keep private pairing/identity backups; a new pairing is a distinct source, not a hostname-based merge.
 
 ## Reading the dashboard
 
@@ -188,7 +180,7 @@ Standalone CLI coverage is **activity-only**: it tracks a bare `copilot` CLI pro
 
 ## Troubleshooting
 
-- **Start fails:** check `node --version` and the relevant `.local\collector-error.log` or `watcher-error.log`. Configuration must precede collector-only startup; pairing must precede watcher-only startup.
+- **Start fails:** check that `uv run <script>.py` reports a healthy start and the relevant `.local\collector-error.log` or `watcher-error.log`. Configuration must precede collector-only startup; pairing must precede watcher-only startup.
 - **Watcher unavailable:** expand source coverage. Verify collector is running, route/private IP/port are correct, and any approved firewall rule permits that specific interface. The web URL is not the HTTPS ingestion URL.
 - **TLS/auth error:** compare certificate fingerprints, expiry, IP/SAN, system clocks, and imported pairing. Re-import the correct bundle; do not disable TLS verification. A revoked credential requires an explicitly authorized pairing.
 - **Identity conflict:** do not copy private installation files or run two watchers from the same identity. Stop the prior instance or wait for lease expiry after a crash; use a unique pairing for each machine.
@@ -200,15 +192,19 @@ Standalone CLI coverage is **activity-only**: it tracks a bare `copilot` CLI pro
 ## Development and verification
 
 ```powershell
-npm test
-node --disable-warning=ExperimentalWarning --test .\test\collector.test.mjs .\test\controls.test.mjs .\test\background.test.mjs .\test\source.test.mjs
-node .\scripts\verify-ui.mjs
+pytest tests/ -q
+```
+
+The Python test suite (`tests/`) covers the status engine, TLS pairing/protocol, lease/sequence/clock-skew handling, dismissal/dedupe, the native tray, and the new launcher scripts, using synthetic metadata and owned temporary directories. It exercises TLS/auth/schema/size rejection, namespace isolation, notifications, dismissal/resume, heartbeat loss, migration, restart, and dedupe. It never touches real Copilot data.
+
+Two browser-rendering tools, used to visually validate `public/` UI changes without touching real Copilot data, remain for dev use. The fixture harness is now a Python port; the headless-Edge driver that automates it is still Node (it only drives a browser, it has no dependency on the old `.mjs` implementation):
+
+```powershell
+python .\scripts\verify_ui.py
 node .\scripts\check-ui.mjs
 ```
 
-Tests use synthetic metadata and owned temporary directories. The Windows integration test creates app-local test certificates, launches a real HTTPS collector, two independent reporter transport processes with colliding session IDs/hostnames, and the full watcher executable against an empty synthetic Copilot home. It exercises TLS/auth/schema/size rejection, namespace isolation, notifications, dismissal/resume, heartbeat loss, migration, restart, and dedupe. It never dismisses production records.
-
-The separate browser fixture harness prints a loopback URL and checks both themes, compactness, long names, source labels, disclosure/focus, and wide/narrow layouts using real UI assets. It never reads Copilot data. Results appear on the page and `/results`; stop it with Ctrl+C. `check-ui.mjs` automates the harness using an installed, isolated headless Edge instance and cleans up its own profile/processes. Add `--live` only to also inspect the local collector's rendering read-only. Loopback process tests are not proof of a physical second machine's VPN/firewall setup.
+The separate browser fixture harness (`scripts/verify_ui.py`, an aiohttp port of the original `verify-ui.mjs`) prints a loopback URL and checks both themes, compactness, long names, source labels, disclosure/focus, and wide/narrow layouts using the real `public/` UI assets, synthetic fixture data, and the real `pymonitor.families`/`pymonitor.actions` modules. It never reads Copilot data. Results appear on the page and `/results`; stop it with Ctrl+C. `check-ui.mjs` automates the harness using an installed, isolated headless Edge instance and cleans up its own profile/processes. Add `--live` only to also inspect the local collector's rendering read-only. Loopback process tests are not proof of a physical second machine's VPN/firewall setup.
 
 ## License
 
