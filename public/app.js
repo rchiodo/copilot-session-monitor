@@ -4,6 +4,7 @@ let state;
 let stopped = false;
 let dismissing = false;
 let statusRequest = 0;
+let eventSource;
 const cards = new Map();
 
 function elapsed(start) {
@@ -224,10 +225,23 @@ function render() {
   document.title = `${working} working, ${sessions.length} retained - Copilot session monitor`;
 }
 
-async function refresh() {
+function connectStream() {
   if (stopped) return;
-  await loadStatus();
-  if (!stopped) setTimeout(refresh, 1500);
+  eventSource = new EventSource('/api/stream');
+  eventSource.onmessage = event => {
+    state = JSON.parse(event.data);
+    render();
+  };
+  eventSource.onerror = () => {
+    if (state) {
+      state = { ...state, healthy: false, theme: null };
+      render();
+    }
+    $('health').textContent = 'Monitor disconnected. Run Start-Tray.ps1 /host to reconnect. No completion inferred.';
+    $('health').className = 'warning';
+    $('health').hidden = false;
+    document.title = 'Status unavailable - Copilot session monitor';
+  };
 }
 
 async function loadStatus() {
@@ -305,6 +319,7 @@ $('stop').addEventListener('click', async () => {
   try {
     await control('stop');
     stopped = true;
+    eventSource?.close();
     if (state) {
       state = { ...state, healthy: false, theme: null };
       render();
@@ -319,4 +334,4 @@ $('stop').addEventListener('click', async () => {
     $('health').hidden = false;
   }
 });
-refresh();
+connectStream();

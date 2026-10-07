@@ -61,10 +61,31 @@ async function page(sessions) {
       machine: 'TEST', updatedAt: timestamp, notification: { message: 'Ready' },
       theme: { mode: 'light', source: 'windows-apps' },
     },
-    poll: () => pending.shift()(),
+    eventSource: null,
+    poll: () => {
+      if (!fixture.eventSource) return;
+      if (fixture.fail) fixture.eventSource.onerror?.();
+      else fixture.eventSource.onmessage?.({ data: JSON.stringify(fixture.status) });
+    },
   };
+  class MockEventSource {
+    constructor(url) {
+      this.url = url;
+      this.closed = false;
+      fixture.eventSource = this;
+      // Mirror the server's behavior of pushing an initial frame on connect, scheduled as a
+      // microtask so it fires after the caller assigns onmessage/onerror.
+      Promise.resolve().then(() => {
+        if (this.closed) return;
+        if (fixture.fail) this.onerror?.();
+        else this.onmessage?.({ data: JSON.stringify(fixture.status) });
+      });
+    }
+    close() { this.closed = true; }
+  }
   vm.runInNewContext(code, {
     document, Date, AbortSignal,
+    EventSource: MockEventSource,
     setTimeout: fn => pending.push(fn),
     fetch: async (_url, options) => {
       assert.ok(options.signal);

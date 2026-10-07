@@ -60,6 +60,13 @@ _STATIC_ASSETS = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
     "/style.css": ("style.css", "text/css; charset=utf-8"),
 }
+_SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Content-Security-Policy": (
+        "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
+        "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+    ),
+}
 
 
 def _shorten(value: Any, length: int) -> str:
@@ -113,6 +120,7 @@ class CollectorServer:
         self._dashboard_runner: web.AppRunner | None = None
         self._ingest_runners: list[web.AppRunner] = []
         self._timer_task: Any = None
+        self._sse_clients: set[web.StreamResponse] = set()
         self.local_reporter_id: str | None = None
         self.processes: dict[str, Any] | None = None
         self.local_reset: str | None = None
@@ -295,9 +303,11 @@ class CollectorServer:
                     return
                 await self.actions.run(self._refresh_tick)
                 await self._local_poll()
+                await self._broadcast_status()
 
         self._timer_task = asyncio.ensure_future(_loop())
         await self._local_poll()
+        await self._broadcast_status()
 
     async def _refresh_tick(self) -> None:
         try:
@@ -345,6 +355,7 @@ class CollectorServer:
     async def _start_dashboard(self) -> None:
         app = web.Application(middlewares=[self._same_origin_middleware])
         app.router.add_get("/api/status", self._handle_status)
+        app.router.add_get("/api/stream", self._handle_stream)
         app.router.add_get("/api/control", self._handle_control_token)
         app.router.add_post("/api/test", self._handle_test)
         app.router.add_post("/api/stop", self._handle_stop)
@@ -359,13 +370,7 @@ class CollectorServer:
 
     @web.middleware
     async def _same_origin_middleware(self, request: web.Request, handler: Any) -> web.StreamResponse:
-        response_headers = {
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": (
-                "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
-                "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
-            ),
-        }
+        response_headers = dict(_SECURITY_HEADERS)
         host = request.headers.get("Host")
         origin = request.headers.get("Origin")
         if (
@@ -392,6 +397,49 @@ class CollectorServer:
     async def _handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self.status())
 
+    async def _handle_stream(self, request: web.Request) -> web.StreamResponse:
+        import asyncio
+
+        response = web.StreamResponse(
+            headers={
+                **_SECURITY_HEADERS,
+                "Content-Type": "text/event-stream",
+                "Cache-Control": "no-store",
+                "X-Accel-Buffering": "no",
+            }
+        )
+        await response.prepare(request)
+        self._sse_clients.add(response)
+        try:
+            await self._sse_write(response, self.status())
+            await asyncio.Event().wait()
+        except ConnectionResetError:
+            pass  # client dropped mid-write; disconnect is handled like any other below.
+        finally:
+            self._sse_clients.discard(response)
+        return response
+
+    @staticmethod
+    async def _sse_write(response: web.StreamResponse, payload: dict[str, Any]) -> None:
+        import json
+
+        # `retry:` tells the browser's native EventSource reconnect backoff how
+        # long to wait, keeping it close to the previous ~1.5s poll cadence.
+        await response.write(f"retry: 1000\ndata: {json.dumps(payload)}\n\n".encode("utf-8"))
+
+    async def _broadcast_status(self) -> None:
+        if not self._sse_clients:
+            return
+        payload = self.status()
+        dead: list[web.StreamResponse] = []
+        for client in list(self._sse_clients):
+            try:
+                await self._sse_write(client, payload)
+            except Exception:  # noqa: BLE001 -- a dead/dropped stream client should not block the others.
+                dead.append(client)
+        for client in dead:
+            self._sse_clients.discard(client)
+
     async def _handle_control_token(self, request: web.Request) -> web.Response:
         return web.json_response({"token": self.token})
 
@@ -405,6 +453,7 @@ class CollectorServer:
         if denied:
             return denied
         await self.test_notification()
+        await self._broadcast_status()
         return web.json_response({"notification": self.notification})
 
     async def _handle_stop(self, request: web.Request) -> web.Response:
@@ -423,6 +472,7 @@ class CollectorServer:
             return denied
         entries = await read_dismiss_entries(request.content.iter_any())
         result = await self.actions.dismiss(entries)
+        await self._broadcast_status()
         return web.json_response(result)
 
     async def _handle_static(self, request: web.Request) -> web.Response:

@@ -25,6 +25,7 @@ covered anywhere else.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from datetime import datetime, timezone
@@ -72,6 +73,7 @@ def _build_dashboard_app(server: CollectorServer) -> web.Application:
     real TCPSite bind (tests host it via aiohttp's TestServer instead)."""
     app = web.Application(middlewares=[server._same_origin_middleware])
     app.router.add_get("/api/status", server._handle_status)
+    app.router.add_get("/api/stream", server._handle_stream)
     app.router.add_get("/api/control", server._handle_control_token)
     app.router.add_post("/api/test", server._handle_test)
     app.router.add_post("/api/stop", server._handle_stop)
@@ -291,6 +293,75 @@ async def test_dismiss_skips_unknown_ids_once_bridge_ready(dashboard) -> None:
     assert body["dismissed"] == []
     assert len(body["skipped"]) == 1
     assert body["skipped"][0]["id"] == "does-not-exist"
+
+
+# -- /api/stream (SSE) ----------------------------------------------------------
+
+
+async def _read_sse_frame(resp) -> dict[str, Any]:
+    """Reads one `retry: ...\\ndata: {...}\\n\\n` frame off an open stream
+    response and returns the decoded JSON payload."""
+    retry_line = await resp.content.readline()
+    assert retry_line == b"retry: 1000\n"
+    data_line = await resp.content.readline()
+    assert data_line.startswith(b"data: ")
+    blank_line = await resp.content.readline()
+    assert blank_line == b"\n"
+    return json.loads(data_line[len(b"data: "):])
+
+
+async def test_stream_delivers_initial_status_frame_then_closes_cleanly(dashboard) -> None:
+    server, client = dashboard
+    resp = await client.request("GET", "/api/stream")
+    assert resp.status == 200
+    assert resp.headers["Content-Type"].startswith("text/event-stream")
+    assert resp.headers["Cache-Control"] == "no-store"
+    assert resp.headers["X-Accel-Buffering"] == "no"
+    assert len(server._sse_clients) == 1
+
+    payload = await _read_sse_frame(resp)
+    expected = server.status()
+    # `updatedAt` is independently stamped on each call; compare everything else exactly.
+    payload.pop("updatedAt")
+    expected.pop("updatedAt")
+    assert payload == expected
+
+    resp.close()
+    await asyncio.sleep(0.1)
+    assert server._sse_clients == set()
+
+
+async def test_stream_broadcasts_a_fresh_frame_after_test_notification(dashboard) -> None:
+    server, client = dashboard
+    stream_resp = await client.request("GET", "/api/stream")
+    first = await _read_sse_frame(stream_resp)
+
+    accepted = await client.request("POST", "/api/test", headers={"Authorization": f"Bearer {server.token}"})
+    assert accepted.status == 200
+
+    second = await _read_sse_frame(stream_resp)
+    assert second["updatedAt"] != first["updatedAt"]
+    assert second["notification"]["message"] == (await accepted.json())["notification"]["message"]
+
+    stream_resp.close()
+
+
+async def test_stream_broadcasts_after_dismiss(dashboard) -> None:
+    server, client = dashboard
+    server.on_bridge_ready()
+    stream_resp = await client.request("GET", "/api/stream")
+    first = await _read_sse_frame(stream_resp)
+
+    resp = await client.request(
+        "POST", "/api/dismiss", headers={"Authorization": f"Bearer {server.token}"},
+        json={"entries": [{"id": "does-not-exist", "key": "a" * 64}]},
+    )
+    assert resp.status == 200
+
+    second = await _read_sse_frame(stream_resp)
+    assert second["updatedAt"] != first["updatedAt"]
+
+    stream_resp.close()
 
 
 # -- static assets --------------------------------------------------------------
