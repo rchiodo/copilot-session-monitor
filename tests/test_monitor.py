@@ -76,7 +76,7 @@ class Rig:
     alerts: list[dict[str, Any]]
 
 
-def rig(retained: list | None = None) -> Rig:
+def rig(retained: list | None = None, process_started_at_ms: float | None = None) -> Rig:
     alerts: list[dict[str, Any]] = []
     seen: set[str] = set()
 
@@ -85,7 +85,7 @@ def rig(retained: list | None = None) -> Rig:
             alerts.append(alert)
             seen.add(key)
 
-    engine = MonitorEngine("TEST-MACHINE", emit, retained or [])
+    engine = MonitorEngine("TEST-MACHINE", emit, retained or [], process_started_at_ms)
     return Rig(engine, alerts)
 
 
@@ -243,6 +243,32 @@ async def test_metadata_only_store_retains_completed_rows_restart_never_promotes
     running.accept(end())
     await restarted.engine.update([sample(running, {"id": "running", "busy": False})], now=12000)
     assert len(restarted.alerts) == 1
+
+
+async def test_finished_row_restored_from_before_this_engine_started_is_unconfirmed_until_reobserved():
+    # A cold host restart loading a session that finished days ago (e.g. from
+    # disk, never seen by this process before) must not surface as a fresh,
+    # legitimate "finished" row -- this is the MonitorEngine-level counterpart
+    # to FamilyMonitor's own restore-staleness check, which only covers rows
+    # FamilyMonitor itself previously persisted, not rows supplied fresh here.
+    stale = {
+        "id": "stale-session", "title": "Old work", "machine": "TEST-MACHINE", "source": "Copilot desktop",
+        "state": "finished", "detail": "Completed two days ago", "activity": "Agent running", "runId": "run-old",
+        "firstObservedAt": _iso(1000), "startedAt": _iso(1000), "lastEventAt": _iso(1000),
+        "lastResponseAt": _iso(1000), "finishedAt": _iso(1000),
+        "parentId": None, "hierarchyIssue": None, "contextOnly": False, "lastAlert": None,
+    }
+    r = rig([stale], process_started_at_ms=200000)
+    assert r.engine.rows["stale-session"]["state"] == "unknown"
+    assert r.engine.rows["stale-session"]["finishedAt"] is None
+    view = await r.engine.update([], now=300000)
+    assert view["sessions"][0]["state"] == "unknown"
+    assert len(r.alerts) == 0
+    # A row that finished AFTER this engine started must be left alone.
+    fresh = {**stale, "id": "fresh-session", "finishedAt": _iso(250000)}
+    r2 = rig([fresh], process_started_at_ms=200000)
+    assert r2.engine.rows["fresh-session"]["state"] == "finished"
+    assert r2.engine.rows["fresh-session"]["finishedAt"] == _iso(250000)
 
 
 async def test_saved_waiting_state_is_unconfirmed_after_restart_unless_fresh_evidence_supports_it():

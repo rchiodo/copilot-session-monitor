@@ -88,7 +88,11 @@ def sort_sessions(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(rows, key=key)
 
 
-def unavailable_sessions(rows: Iterable[dict[str, Any]], reason: str) -> list[dict[str, Any]]:
+def unavailable_sessions(
+    rows: Iterable[dict[str, Any]],
+    reason: str,
+    process_started_at_ms: float | None = None,
+) -> list[dict[str, Any]]:
     out = []
     for row in rows:
         result = dict(row)
@@ -96,10 +100,26 @@ def unavailable_sessions(rows: Iterable[dict[str, Any]], reason: str) -> list[di
             result["state"] = "unknown"
             result["detail"] = reason
             result["finishedAt"] = None
+        elif (
+            row.get("state") == "finished"
+            and process_started_at_ms is not None
+            and _parse_date(row.get("finishedAt")) < process_started_at_ms
+        ):
+            # A "finished" row restored from disk that completed before *this*
+            # engine instance even started (e.g. a cold host restart loading a
+            # session that finished days ago). Without this, such a row never
+            # passes through FamilyMonitor's own restore-staleness check at
+            # all -- that check only looks at FamilyMonitor's own previously
+            # persisted families, not at rows freshly supplied here on the
+            # very first tick. Treat it the same as a stale working/waiting/
+            # idle row: unconfirmed until genuinely re-observed.
+            result["state"] = "unknown"
+            result["detail"] = reason
+            result["finishedAt"] = None
         if row.get("members"):
-            result["members"] = unavailable_sessions(row["members"], reason)
+            result["members"] = unavailable_sessions(row["members"], reason, process_started_at_ms)
             if row.get("relatives"):
-                result["relatives"] = unavailable_sessions(row["relatives"], reason)
+                result["relatives"] = unavailable_sessions(row["relatives"], reason, process_started_at_ms)
             result["runningCount"] = 0
         out.append(result)
     return out
@@ -238,13 +258,21 @@ EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 class MonitorEngine:
     """Mirrors engine.mjs's MonitorEngine class -- the per-machine status state machine."""
 
-    def __init__(self, machine: str, emit: EmitFn, retained: Iterable[dict[str, Any]] = ()) -> None:
+    def __init__(
+        self,
+        machine: str,
+        emit: EmitFn,
+        retained: Iterable[dict[str, Any]] = (),
+        process_started_at_ms: float | None = None,
+    ) -> None:
         self.machine = machine
         self.emit = emit
         self.observed: dict[str, dict[str, Any]] = {}
         self.rows: dict[str, dict[str, Any]] = {
             row["id"]: row
-            for row in unavailable_sessions(list(retained), "Monitor restarted; current run status is unconfirmed")
+            for row in unavailable_sessions(
+                list(retained), "Monitor restarted; current run status is unconfirmed", process_started_at_ms
+            )
         }
         self.last_poll: float | None = None
         self.baseline = True

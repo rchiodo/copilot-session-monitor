@@ -175,10 +175,17 @@ class FamilyMonitor:
         async def _record(key: str, alert: dict[str, Any]) -> None:
             self.pending.append({"key": key, **alert})
 
-        self.engine = MonitorEngine(machine, _record, list(retained))
+        self.engine = MonitorEngine(machine, _record, list(retained), process_started_at_ms)
         self.armed: dict[str, str] = {}
         self.dismissed: dict[str, str] = dict(dismissed or {})
         self.relatives: list[dict[str, Any]] = []
+        # `restored_families` reflects exactly what was persisted to disk and
+        # is what prior "Clear retained" dismissals were always keyed against
+        # (a family's dismissKey only ever exists for a "finished"/"unknown"
+        # aggregate state, and those states are untouched by MonitorEngine's
+        # own working/waiting/idle startup demotion -- so comparing against
+        # the raw persisted data keeps existing dismiss-key matching exactly
+        # as before for that general case).
         restored_families = group_families(list(retained))
         self.startup_hidden: set[str] = {
             row["id"]
@@ -186,6 +193,17 @@ class FamilyMonitor:
             if row.get("dismissKey") and self.dismissed.get(row["id"]) == row["dismissKey"]
         }
         if process_started_at_ms is not None:
+            # `current_families` reflects what MonitorEngine *actually*
+            # exposes via self.rows right now, which (only for this specific
+            # case) already differs from `restored_families`: MonitorEngine's
+            # own staleness fix demotes a pre-process-start "finished" row to
+            # "unknown" before this constructor ever runs, so the family's
+            # live aggregate state -- and thus its dismissKey -- has already
+            # changed out from under the raw persisted snapshot. snapshot()
+            # and dismiss() always recompute dismissKey from self.rows (never
+            # from raw retained), so the key stored here must match that, or
+            # the family would never actually hide.
+            current_families = {row["id"]: row for row in group_families(list(self.engine.rows.values()))}
             for row in restored_families:
                 if row["state"] != "finished" or not row.get("dismissKey"):
                     continue
@@ -203,7 +221,10 @@ class FamilyMonitor:
                     # the family the instant it produces a genuinely new
                     # completion (a different dismissKey) after this process
                     # started -- no separate "stale" bookkeeping needed.
-                    self.dismissed.setdefault(row["id"], row["dismissKey"])
+                    current_row = current_families.get(row["id"])
+                    if current_row and current_row.get("dismissKey"):
+                        self.dismissed.setdefault(row["id"], current_row["dismissKey"])
+
 
     @property
     def rows(self) -> dict[str, dict[str, Any]]:
