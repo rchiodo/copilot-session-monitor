@@ -68,9 +68,20 @@ class RoleConfig:
     runtime_file: str  # "runtime.json" | "watcher-runtime.json"
     status_endpoint: str  # "/api/status" | "/status"
     stop_endpoint: str  # "/api/stop" | "/stop"
+    # Collector-only: its dashboard binds a fixed (MONITOR_PORT-overridable)
+    # loopback port, so a live instance can be rediscovered over HTTP even
+    # if its runtime file is missing or was never written. The watcher binds
+    # an OS-assigned ephemeral port and has no well-known address, so it
+    # leaves these unset and gets none of this fallback.
+    default_url_candidates: tuple[str, ...] = ()
+    control_endpoint: str | None = None  # unauthenticated token-fetch endpoint
 
 
-COLLECTOR_ROLE = RoleConfig("collector", "host", "runtime.json", "/api/status", "/api/stop")
+COLLECTOR_ROLE = RoleConfig(
+    "collector", "host", "runtime.json", "/api/status", "/api/stop",
+    default_url_candidates=(f"http://127.0.0.1:{os.environ.get('MONITOR_PORT', '43187')}",),
+    control_endpoint="/api/control",
+)
 WATCHER_ROLE = RoleConfig("watcher", "client", "watcher-runtime.json", "/status", "/stop")
 ROLES = {"collector": COLLECTOR_ROLE, "watcher": WATCHER_ROLE}
 
@@ -154,6 +165,36 @@ def probe_status(
         return None
 
 
+def _reconstruct_live_runtime(
+    role: RoleConfig,
+    *,
+    timeout: float,
+    http_get_json: HttpGetJson,
+) -> dict[str, Any] | None:
+    """Fallback for when the runtime file is missing -- lost to an external
+    process, or never written due to some startup edge case -- but the role
+    is still alive and serving on its well-known loopback port. Only does
+    anything for roles that declare `default_url_candidates`/`control_endpoint`
+    (collector); for roles without those (watcher), this is always a no-op,
+    preserving the original "missing file means not running" behavior."""
+    if not role.default_url_candidates or not role.control_endpoint:
+        return None
+    for url in role.default_url_candidates:
+        try:
+            status = http_get_json(f"{url}{role.status_endpoint}", timeout)
+            instance_id = status.get("instanceId")
+            if not instance_id:
+                continue
+            control = http_get_json(f"{url}{role.control_endpoint}", timeout)
+            token = control.get("token")
+            if not token:
+                continue
+        except (urllib.error.URLError, OSError, ValueError, TimeoutError):
+            continue
+        return {"pid": None, "instanceId": instance_id, "url": url, "token": token}
+    return None
+
+
 def get_live_role(
     data_dir: Path,
     role: RoleConfig,
@@ -167,10 +208,12 @@ def get_live_role(
     the runtime file. A stale runtime file left behind by a process that
     died uncleanly, or one now describing an unrelated process that
     happens to be listening on the same port, is correctly treated as
-    "not live"."""
+    "not live". If the runtime file doesn't exist at all, falls back to
+    `_reconstruct_live_runtime` (collector only) rather than assuming the
+    role isn't running."""
     runtime = load_runtime(data_dir, role)
     if runtime is None:
-        return None
+        return _reconstruct_live_runtime(role, timeout=timeout, http_get_json=http_get_json)
     status = probe_status(runtime, role, timeout=timeout, http_get_json=http_get_json)
     if status is not None and status.get("instanceId") == runtime.get("instanceId"):
         return runtime
@@ -290,8 +333,9 @@ def stop_role(
     poll_interval: float = 0.25,
 ) -> bool:
     """Port of Stop-Role.ps1. Returns False if no runtime file was present
-    (a no-op, not an error -- the role simply isn't running). Returns True
-    once the role has confirmed-stopped (its runtime file is gone).
+    *and* the role couldn't be rediscovered live (a no-op, not an error --
+    the role simply isn't running). Returns True once the role has
+    confirmed-stopped.
 
     Raises `LauncherError` if the runtime file's recorded `instanceId`
     doesn't match what the live process reports -- the safety check that
@@ -300,11 +344,16 @@ def stop_role(
     """
     data_dir = data_dir if data_dir is not None else data_dir_for(root)
     runtime_path = data_dir / role.runtime_file
+    had_runtime_file = True
     try:
         runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return False
-    _validate_url(runtime.get("url", ""))
+        had_runtime_file = False
+        runtime = _reconstruct_live_runtime(role, timeout=status_timeout, http_get_json=http_get_json)
+        if runtime is None:
+            return False
+    if had_runtime_file:
+        _validate_url(runtime.get("url", ""))
 
     status = http_get_json(f"{runtime['url']}{role.status_endpoint}", status_timeout)
     if status.get("instanceId") != runtime.get("instanceId"):
@@ -316,10 +365,20 @@ def stop_role(
         stop_timeout,
     )
 
-    for _ in range(poll_attempts):
-        if not runtime_path.exists():
-            break
-        sleep(poll_interval)
-    if runtime_path.exists():
-        raise LauncherError(f"{role.name} did not finish stopping.")
+    if had_runtime_file:
+        for _ in range(poll_attempts):
+            if not runtime_path.exists():
+                break
+            sleep(poll_interval)
+        if runtime_path.exists():
+            raise LauncherError(f"{role.name} did not finish stopping.")
+    else:
+        # No runtime file to watch disappear (it was never there) -- poll
+        # the reconstructed URL instead, until it stops responding.
+        for _ in range(poll_attempts):
+            if probe_status(runtime, role, timeout=status_timeout, http_get_json=http_get_json) is None:
+                break
+            sleep(poll_interval)
+        else:
+            raise LauncherError(f"{role.name} did not finish stopping.")
     return True

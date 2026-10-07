@@ -363,6 +363,100 @@ def test_stop_role_posts_a_bearer_token_matching_the_runtime_file(tmp_path: Path
     assert headers == {"Authorization": f"Bearer {runtime['token']}"}
 
 
+def _fallback_http_get_json(
+    instance_id: str, token: str, url: str = "http://127.0.0.1:43187"
+) -> Any:
+    """A fake transport that answers the collector's two unauthenticated
+    discovery endpoints (status + control-token) at its well-known URL,
+    simulating a live collector with no runtime file on disk."""
+
+    def _get(target_url: str, timeout: float) -> dict[str, Any]:
+        if target_url == f"{url}/api/status":
+            return {"instanceId": instance_id, "healthy": True}
+        if target_url == f"{url}/api/control":
+            return {"token": token}
+        raise OSError(f"unexpected url {target_url}")
+
+    return _get
+
+
+def test_get_live_role_reconstructs_a_live_collector_when_the_runtime_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    # The core fix: runtime.json is simply absent (lost, or never written
+    # at startup for whatever reason) but the collector is still alive and
+    # reachable on its fixed, deterministic dashboard port -- so this must
+    # not be treated as "not running".
+    instance_id = "88888888-8888-8888-8888-888888888888"
+    runtime = get_live_role(
+        tmp_path, COLLECTOR_ROLE, http_get_json=_fallback_http_get_json(instance_id, "feedface")
+    )
+    assert runtime is not None
+    assert runtime["instanceId"] == instance_id
+    assert runtime["token"] == "feedface"
+    assert runtime["url"] == "http://127.0.0.1:43187"
+
+
+def test_get_live_role_fallback_is_a_no_op_for_the_watcher_role(tmp_path: Path) -> None:
+    # The watcher has no well-known port (OS-assigned/ephemeral), so even a
+    # transport that would happily answer any request must not be used to
+    # fabricate a watcher runtime -- a missing watcher-runtime.json always
+    # means "not running".
+    assert (
+        get_live_role(
+            tmp_path, WATCHER_ROLE, http_get_json=_fallback_http_get_json("anything", "anything")
+        )
+        is None
+    )
+
+
+def test_get_live_role_fallback_returns_none_when_the_collector_is_truly_not_running(
+    tmp_path: Path,
+) -> None:
+    def _refused(url: str, timeout: float) -> dict[str, Any]:
+        raise OSError("connection refused")
+
+    assert get_live_role(tmp_path, COLLECTOR_ROLE, http_get_json=_refused) is None
+
+
+def test_stop_role_stops_a_collector_discovered_via_fallback_when_runtime_file_is_missing(
+    tmp_path: Path,
+) -> None:
+    instance_id = "99999999-9999-9999-9999-999999999999"
+    get_json = _fallback_http_get_json(instance_id, "feedface")
+    posted = []
+    still_alive = [True]
+
+    def _post(url: str, headers: dict[str, str], timeout: float) -> None:
+        posted.append((url, headers))
+        still_alive[0] = False
+
+    def _get(url: str, timeout: float) -> dict[str, Any]:
+        if not still_alive[0]:
+            raise OSError("connection refused")
+        return get_json(url, timeout)
+
+    assert (
+        stop_role(tmp_path, COLLECTOR_ROLE, data_dir=tmp_path, http_get_json=_get, http_post=_post, sleep=lambda _s: None)
+        is True
+    )
+    [(url, headers)] = posted
+    assert url == "http://127.0.0.1:43187/api/stop"
+    assert headers == {"Authorization": "Bearer feedface"}
+
+
+def test_stop_role_remains_a_no_op_when_the_collector_is_truly_not_running_and_no_file_exists(
+    tmp_path: Path,
+) -> None:
+    def _refused(url: str, timeout: float) -> dict[str, Any]:
+        raise OSError("connection refused")
+
+    assert (
+        stop_role(tmp_path, COLLECTOR_ROLE, data_dir=tmp_path, http_get_json=_refused, http_post=lambda *a: None)
+        is False
+    )
+
+
 def test_stop_role_raises_if_the_runtime_file_never_disappears(tmp_path: Path) -> None:
     runtime = _write_runtime(tmp_path, COLLECTOR_ROLE)
 
