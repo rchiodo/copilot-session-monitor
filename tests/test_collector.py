@@ -45,6 +45,7 @@ class Fixture:
         tmp_path: Path,
         legacy: list[dict[str, Any]] | None = None,
         dismissed: dict[str, str] | None = None,
+        process_started_at_ms: float | None = None,
     ) -> None:
         self.dir = tmp_path
         self.config = {
@@ -58,6 +59,7 @@ class Fixture:
         self.ledger = Ledger(str(self.dir / "notifications.json"))
         self.legacy = legacy or []
         self.dismissed = dismissed or {}
+        self.process_started_at_ms = process_started_at_ms
 
     async def _notify(self, key: str, alert: dict[str, Any]) -> None:
         if await self.ledger.claim_digest(key):
@@ -66,7 +68,7 @@ class Fixture:
     async def setup(self) -> None:
         await self.ledger.load()
         self.notify = self._notify
-        self.collector = Collector(self.file, self.notify)
+        self.collector = Collector(self.file, self.notify, process_started_at_ms=self.process_started_at_ms)
         await self.collector.load(self.config, self.legacy, self.dismissed)
         self.identities = [
             {"version": 1, "reporterId": pair["id"], "installationId": str(uuid.uuid4()),
@@ -260,6 +262,76 @@ async def test_never_corroborated_finish_cannot_later_zombie_rescue(fixture: Fix
     await f.report(0, [])
     assert by_source_id("done")["state"] == "unknown", \
         "a never-corroborated completion must not resurrect once the watcher simply omits the row"
+
+
+@pytest.mark.asyncio
+async def test_stale_finished_row_from_before_collector_started_never_zombie_rescues(tmp_path: Path) -> None:
+    """Reproduces the perpetual stale-"finished"-after-restart bug: a row
+    confirmed 'finished' (with its lastAlert breadcrumb) by one collector
+    process, which is then restarted. The NEW collector process is given a
+    `process_started_at_ms` after that finish. Once the restarted collector
+    baselines and the watcher's report genuinely stops including the row
+    (its own FamilyMonitor-level restart-staleness fix hides it), the row
+    must stay demoted forever -- not resurrect via either the retained
+    'finished' carry-forward or the lastAlert zombie-rescue -- across
+    arbitrarily many subsequent omitted reports.
+    """
+    def with_alert(row: dict[str, Any]) -> dict[str, Any]:
+        return {**row, "lastAlert": {"sessionId": row["id"], "key": f"alert-{row['id']}", "kind": "finished",
+                                      "message": "Current run finished; this is not task or PR success", "at": AT}}
+
+    f = Fixture(tmp_path, process_started_at_ms=NOW + 10_000)
+    await f.setup()
+    await f.connect()
+    await f.report(0, [member("working", "done")])
+    await f.report(0, [with_alert(member("finished", "done"))], notices=[finish_notice("done")])
+
+    def by_source_id(id_: str) -> dict[str, Any]:
+        source = f.collector.sources[f.identities[0]["reporterId"]]
+        return next(row for row in source["members"] if row["id"] == id_)
+
+    assert by_source_id("done")["state"] == "finished", "confirmed within this process's own lifetime stays trusted"
+
+    # Restart: fresh collector process, same on-disk state, now started
+    # after the finish above (simulates the real restart scenario).
+    for _ in range(5):
+        await f.connect(0, NOW + 20_000)
+        await f.report(0, [], now=NOW + 20_000)
+        assert by_source_id("done")["state"] == "unknown", \
+            "a finish that predates this collector run must never resurrect, no matter how many ticks pass"
+
+
+@pytest.mark.asyncio
+async def test_finish_after_collector_started_still_zombie_rescues(tmp_path: Path) -> None:
+    """Counterpart/no-regression proof: a completion that happens AFTER the
+    current collector process started must still be eligible for the
+    legitimate zombie-row rescue (continuously-healthy watcher narrowing its
+    reporting window), exactly as test_zombie_row_rescue_vs_still_open
+    already proves with no process_started_at_ms set at all.
+    """
+    def with_alert(row: dict[str, Any]) -> dict[str, Any]:
+        return {**row, "lastAlert": {"sessionId": row["id"], "key": f"alert-{row['id']}", "kind": "finished",
+                                      "message": "Current run finished; this is not task or PR success", "at": AT}}
+
+    f = Fixture(tmp_path, process_started_at_ms=NOW - 10_000)
+    await f.setup()
+    await f.connect()
+    await f.report(0, [member("working", "done")])
+    await f.report(0, [with_alert(member("finished", "done"))], notices=[finish_notice("done")])
+
+    await f.connect(0, NOW + 1)
+    await f.report(0, [], now=NOW + 1)
+
+    def by_source_id(id_: str) -> dict[str, Any]:
+        source = f.collector.sources[f.identities[0]["reporterId"]]
+        return next(row for row in source["members"] if row["id"] == id_)
+
+    assert by_source_id("done")["state"] == "unknown", "a fresh baseline still cannot vouch for a row it did not just observe"
+
+    await f.report(0, [], now=NOW + 2)
+    assert by_source_id("done")["state"] == "finished", \
+        "a genuinely recent (post-process-start) confirmed finish still rescues across a reconnect gap"
+    assert by_source_id("done")["finishedAt"] == AT
 
 
 @pytest.mark.asyncio

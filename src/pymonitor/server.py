@@ -257,7 +257,7 @@ class CollectorServer:
         retained = await legacy.load()
         self.ledger = Ledger(str(data_dir / "notifications.json"))
         await self.ledger.load()
-        self.collector = Collector(collector_file, self.notify)
+        self.collector = Collector(collector_file, self.notify, process_started_at_ms=time.time() * 1000)
         await self.collector.load(self.config, retained, legacy.dismissed)
         self.actions = MonitorActions(
             self.collector, self._refresh_configuration, self.collector.save,

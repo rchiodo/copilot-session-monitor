@@ -123,6 +123,23 @@ def _parse_ms(value: str) -> float:
     return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
 
 
+def _stale(at: str | None, process_started_at_ms: float | None) -> bool:
+    """True when timestamp `at` predates this Collector process's own start.
+
+    Mirrors engine.py's `process_started_at_ms` restart-staleness check for
+    the local-session path, applied here to the two places accept()'s
+    omitted-retained-member handling (see module docstring: baseline vs.
+    continuous trust / zombie-row rescue) would otherwise carry a 'finished'
+    verdict forward *forever*, with no expiry, merely because the same
+    finishedAt/lastAlert keeps being the last thing this source ever
+    reported for that id. Without this, a session that finished days before
+    the collector's current run even started -- and that the watcher has
+    since stopped including in its reporting window -- gets perpetually
+    re-surfaced as a fresh completion on every subsequent report.
+    """
+    return process_started_at_ms is not None and at is not None and _parse_ms(at) < process_started_at_ms
+
+
 def _invalid_dismiss_entry(entry: Any) -> bool:
     if not isinstance(entry, dict):
         return True
@@ -141,9 +158,15 @@ class Collector:
     notice (mirrors the ``Ledger.claim_digest`` pattern used elsewhere).
     """
 
-    def __init__(self, file: str, notify: Callable[[str, dict[str, Any]], Awaitable[None]]) -> None:
+    def __init__(
+        self,
+        file: str,
+        notify: Callable[[str, dict[str, Any]], Awaitable[None]],
+        process_started_at_ms: float | None = None,
+    ) -> None:
         self.file = file
         self.notify = notify
+        self.process_started_at_ms = process_started_at_ms
         self.sources: dict[str, dict[str, Any]] = {}
         self.dismissed: dict[str, str] = {}
         self.pairings: dict[str, dict[str, Any]] = {}
@@ -304,6 +327,7 @@ class Collector:
             retained_finish = (
                 saved is not None and saved.get("state") == "finished" and saved.get("runId") == row.get("runId")
                 and saved.get("startedAt") == row.get("startedAt") and saved.get("finishedAt") == row.get("finishedAt")
+                and not _stale(row.get("finishedAt"), self.process_started_at_ms)
             )
             observed_finish = (
                 not baseline and value["healthy"] and not skew
@@ -357,10 +381,17 @@ class Collector:
         # rescue): a retained member the fresh report omitted.
         tracking_lost = 0
         for row in previous_members.values():
-            if not baseline and row.get("state") == "finished":
+            if (
+                not baseline and row.get("state") == "finished"
+                and not _stale(row.get("finishedAt"), self.process_started_at_ms)
+            ):
                 rows.append(row)
                 continue
-            if not baseline and row.get("state") == "unknown" and (row.get("lastAlert") or {}).get("kind") == "finished":
+            if (
+                not baseline and row.get("state") == "unknown"
+                and (row.get("lastAlert") or {}).get("kind") == "finished"
+                and not _stale((row.get("lastAlert") or {}).get("at"), self.process_started_at_ms)
+            ):
                 rows.append({
                     **row, "state": "finished", "finishedAt": row["lastAlert"]["at"],
                     "completionTracked": False, "detail": "Current run finished; this is not task or PR success",
