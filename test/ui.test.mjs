@@ -348,7 +348,7 @@ test('machine labels and source coverage distinguish duplicate hostnames and sta
   assert.match(fixture.nodes.get('source-details').textContent, /UNAVAILABLE/);
 });
 
-test('Machines section stays hidden with no source data, then lists each paired machine with a simple connected/not-connected indicator and last-seen time', async () => {
+test('Machines section stays hidden with no source data, then lists only currently-connected machines with last-seen time', async () => {
   const fixture = await page([session('working')]);
   assert.equal(fixture.nodes.get('machines').hidden, true);
   const idA = '22222222-2222-2222-2222-222222222222';
@@ -359,21 +359,35 @@ test('Machines section stays hidden with no source data, then lists each paired 
   ];
   await fixture.poll();
   assert.equal(fixture.nodes.get('machines').hidden, false);
-  assert.equal(fixture.nodes.get('machines-count').textContent, '1/2');
+  // Disconnected machines are dropped entirely; the count reflects only connected ones.
+  assert.equal(fixture.nodes.get('machines-count').textContent, '1');
   const rows = fixture.nodes.get('machines-list').children;
-  assert.equal(rows.length, 2);
+  assert.equal(rows.length, 1);
   assert.match(rows[0].textContent, /^Laptop - Connected - last seen/);
   assert.equal(rows[0].className, 'machine-row connected');
-  assert.match(rows[1].textContent, /^Desktop - Not connected - last seen/);
-  assert.equal(rows[1].className, 'machine-row warning');
   // No per-issue text dump on the always-visible Machines row itself.
-  assert.doesNotMatch(rows[1].textContent, /watcher has not connected/);
   assert.equal(fixture.nodes.get('machines-empty').hidden, true);
-  // Collector-wide health loss marks every machine unconfirmed, and it updates on refresh.
+  // Collector-wide health loss marks every machine unconfirmed, so none remain "connected".
   fixture.status.healthy = false;
   await fixture.poll();
-  assert.equal(fixture.nodes.get('machines-count').textContent, '0/2');
-  assert.match(fixture.nodes.get('machines-list').children[0].textContent, /Not connected/);
+  assert.equal(fixture.nodes.get('machines-count').textContent, '0');
+  assert.equal(fixture.nodes.get('machines-list').children.length, 0);
+  assert.equal(fixture.nodes.get('machines-empty').hidden, false);
+  assert.match(fixture.nodes.get('machines-empty').textContent, /No machines currently connected/);
+});
+
+test('Machines section shows the empty state when sources are paired but none are currently connected', async () => {
+  const fixture = await page([session('working')]);
+  const idA = '44444444-4444-4444-4444-444444444444';
+  fixture.status.sources = [
+    { id: idA, label: 'Desktop', healthy: false, lastSeen: null, issues: ['Paired; watcher has not connected'] },
+  ];
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('machines').hidden, false);
+  assert.equal(fixture.nodes.get('machines-count').textContent, '0');
+  assert.equal(fixture.nodes.get('machines-list').children.length, 0);
+  assert.equal(fixture.nodes.get('machines-empty').hidden, false);
+  assert.match(fixture.nodes.get('machines-empty').textContent, /No machines currently connected/);
 });
 
 test('light and dark palettes meet 4.5:1 contrast for text, controls, timestamps and every status', async () => {

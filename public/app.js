@@ -170,16 +170,18 @@ function render() {
   }
   $('machines').hidden = !sources;
   if (sources) {
-    $('machines-count').textContent = `${sources.filter(source => source.healthy).length}/${sources.length}`;
+    const connected = sources.filter(source => source.healthy);
+    $('machines-count').textContent = String(connected.length);
     const list = $('machines-list');
     for (const child of [...list.children]) child.remove();
-    for (const source of sources) {
+    for (const source of connected) {
       const row = document.createElement('p');
-      row.className = `machine-row ${source.healthy ? 'connected' : 'warning'}`;
-      row.textContent = `${source.label} - ${source.healthy ? 'Connected' : 'Not connected'} - last seen ${time(source.lastSeen, true)}`;
+      row.className = 'machine-row connected';
+      row.textContent = `${source.label} - Connected - last seen ${time(source.lastSeen, true)}`;
       list.append(row);
     }
-    $('machines-empty').hidden = sources.length > 0;
+    $('machines-empty').hidden = connected.length > 0;
+    $('machines-empty').textContent = 'No machines currently connected.';
   }
   const notificationFailed = state.notification?.state === 'failed';
   const unhealthy = !state.healthy || state.issues.length > 0;
