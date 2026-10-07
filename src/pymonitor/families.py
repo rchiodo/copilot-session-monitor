@@ -18,6 +18,15 @@ from .hierarchy import root_of
 _KEY_RE = re.compile(r"^[a-f0-9]{64}$")
 
 
+def _parse_date(value: str | None) -> float:
+    if not value:
+        return float("-inf")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
+    except ValueError:
+        return float("-inf")
+
+
 def _coalesce(*values: Any) -> Any:
     for value in values:
         if value is not None:
@@ -158,6 +167,7 @@ class FamilyMonitor:
         emit: Callable[[str, dict[str, Any]], Awaitable[None]],
         retained: Iterable[dict[str, Any]] = (),
         dismissed: dict[str, str] | None = None,
+        process_started_at_ms: float | None = None,
     ) -> None:
         self.emit = emit
         self.pending: list[dict[str, Any]] = []
@@ -169,11 +179,31 @@ class FamilyMonitor:
         self.armed: dict[str, str] = {}
         self.dismissed: dict[str, str] = dict(dismissed or {})
         self.relatives: list[dict[str, Any]] = []
+        restored_families = group_families(list(retained))
         self.startup_hidden: set[str] = {
             row["id"]
-            for row in group_families(list(retained))
+            for row in restored_families
             if row.get("dismissKey") and self.dismissed.get(row["id"]) == row["dismissKey"]
         }
+        if process_started_at_ms is not None:
+            for row in restored_families:
+                if row["state"] != "finished" or not row.get("dismissKey"):
+                    continue
+                if _parse_date(row.get("finishedAt")) < process_started_at_ms:
+                    # A "finished" family restored from a previous process run
+                    # that was already complete before *this* run even started.
+                    # The user's expectation is that the Finished column only
+                    # shows work observed during the current run, not every
+                    # historical completion ever persisted to disk. Reuse the
+                    # exact same dismissed-key mechanism "Clear retained" uses
+                    # (setdefault so an already-explicit dismissal isn't
+                    # clobbered): the dynamic dismissed-key check already in
+                    # update()/snapshot() keeps hiding it only while its
+                    # dismissKey stays unchanged, and automatically re-surfaces
+                    # the family the instant it produces a genuinely new
+                    # completion (a different dismissKey) after this process
+                    # started -- no separate "stale" bookkeeping needed.
+                    self.dismissed.setdefault(row["id"], row["dismissKey"])
 
     @property
     def rows(self) -> dict[str, dict[str, Any]]:

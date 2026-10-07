@@ -308,6 +308,45 @@ async def test_unknown_failed_or_cancelled_background_outcomes_never_imply_succe
         assert not any(a["kind"] == "finished" for a in alerts), mode
 
 
+async def test_background_failure_acknowledged_by_later_tool_activity_does_not_surface_error_or_block_finished():
+    # A background shell fails mid-turn, but the agent keeps working afterward (one more
+    # tool call) and the turn still ends cleanly. The failure should not get to veto the
+    # genuine completion -- neither as a lingering session-level "error" nor by pinning
+    # the family "unconfirmed"/"working" forever.
+    alerts, monitor = rig()
+    state = start()
+    launch(state)
+    await monitor.update([sample("child", state, True)], {"now": 1000})
+    state.accept(event("system.notification", {"kind": {"type": "shell_completed", "shellId": "shell-a", "exitCode": 1}}))
+    assert state.snapshot()["backgroundFailure"] is not None
+    assert state.snapshot()["backgroundFailureAcknowledged"] is False
+    state.accept(event("tool.execution_start", {"toolName": "read_powershell", "toolCallId": "after-failure", "arguments": {"shellId": "shell-a"}}))
+    state.accept(event("tool.execution_complete", {"toolCallId": "after-failure", "success": True, "result": {"content": "PRIVATE"}}))
+    assert state.snapshot()["backgroundFailureAcknowledged"] is True
+    final(state)
+    assert state.snapshot()["error"] is None
+    view = await monitor.update([sample("child", state)], {"now": 2000})
+    assert view["sessions"][0]["state"] == "finished"
+    assert len([a for a in alerts if a["kind"] == "finished"]) == 1
+    assert not any(a["kind"] == "error" for a in alerts)
+
+
+async def test_unacknowledged_background_failure_still_surfaces_as_error_same_as_before():
+    # Counterpart to the acknowledged case above: if nothing happens after the failure
+    # before the turn ends, the failure must still surface as a real session-level error,
+    # same as before this fix -- this is not a blanket suppression.
+    alerts, monitor = rig()
+    state = start()
+    launch(state)
+    await monitor.update([sample("child", state, True)], {"now": 1000})
+    state.accept(event("system.notification", {"kind": {"type": "shell_completed", "shellId": "shell-a", "exitCode": 1}}))
+    final(state)
+    assert state.snapshot()["error"] is not None
+    view = await monitor.update([sample("child", state)], {"now": 2000})
+    assert view["sessions"][0]["state"] == "error"
+    assert len([a for a in alerts if a["kind"] == "error"]) == 1
+
+
 def test_nested_task_agents_hold_root_run_open_without_replacing_response_or_identity():
     state = start()
     run_id = state.run_id

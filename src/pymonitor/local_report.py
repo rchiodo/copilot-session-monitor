@@ -9,6 +9,7 @@ same conservative completion rules.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any, Awaitable, Callable
 
 from .engine import digest
@@ -46,7 +47,13 @@ def create_local_observer(
     async def _notify(key: str, alert: dict[str, Any]) -> None:
         on_notice({"key": digest(key), "familyId": alert["familyId"], "kind": alert["kind"]})
 
-    monitor = FamilyMonitor(label, _notify, retained)
+    # Hide any "finished" family restored from a previous process run that
+    # completed before *this* run even started -- the Finished column should
+    # only show work observed during the current run, not stale completions
+    # that could otherwise linger on screen indefinitely (see
+    # FamilyMonitor.__init__'s process_started_at_ms handling for how this
+    # stays consistent with the existing dismiss/re-surface mechanism).
+    monitor = FamilyMonitor(label, _notify, retained, process_started_at_ms=time.time() * 1000)
     source = LocalSource(os.path.join(os.path.expanduser("~"), ".copilot"), process_snapshot)
     for id_ in monitor.rows.keys():
         source.tracked.add(id_)

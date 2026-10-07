@@ -89,6 +89,7 @@ class BackgroundWork:
         self.shells: dict[str, _Shell] = {}
         self.agents: dict[str, str] = {}
         self.failure: dict[str, Any] | None = None
+        self.failure_acknowledged = False
 
     def accept(self, event: dict[str, Any]) -> None:
         d = event.get("data") or {}
@@ -97,6 +98,14 @@ class BackgroundWork:
 
         if event_type in ("session.start", "session.resume") and not agent_id:
             self.reset()
+
+        # Any further tool activity after a recorded failure is evidence the
+        # agent kept working past it (and possibly handled it) rather than the
+        # run simply ending right on top of an unresolved failure. Once
+        # acknowledged, the failure no longer gets to veto a later genuine
+        # successful completion of this same turn -- see snapshot().
+        if event_type == "tool.execution_start" and self.failure is not None and not self.failure_acknowledged:
+            self.failure_acknowledged = True
 
         if event_type == "subagent.started" and agent_id:
             self.agents[agent_id] = event["timestamp"]
@@ -113,6 +122,7 @@ class BackgroundWork:
                 self.agents[agent_id] = event["timestamp"]
             else:
                 self.failure = None
+                self.failure_acknowledged = False
         elif event_type == "system.notification":
             kind = d.get("kind") or {}
             kind_type = kind.get("type")
@@ -160,6 +170,7 @@ class BackgroundWork:
         self.shells[shell_id] = _Shell(previous.detached, previous.at, "done" if isinstance(exit_code, int) else "unknown")
         if not previous.detached and isinstance(exit_code, int) and exit_code != 0:
             self.failure = {"id": event["id"], "kind": "Background command exited unsuccessfully"}
+            self.failure_acknowledged = False
 
     def snapshot(self) -> dict[str, Any]:
         shells = [item for item in self.shells.values() if not item.detached and item.state != "done"]
@@ -170,4 +181,5 @@ class BackgroundWork:
             "backgroundAt": max(times) if times else None,
             "backgroundUnconfirmed": any(item.state == "unknown" for item in shells),
             "backgroundFailure": self.failure,
+            "backgroundFailureAcknowledged": self.failure_acknowledged,
         }

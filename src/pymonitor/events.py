@@ -210,7 +210,10 @@ class EventState:
 
     def _settle_background(self, event: dict[str, Any]) -> None:
         work = self.background.snapshot()
-        if work["backgroundCount"] or work["backgroundUnconfirmed"] or work["backgroundFailure"]:
+        # An acknowledged failure (the agent kept doing things after it, and the
+        # turn ended on its own successful terms) no longer vetoes settling to
+        # "finished" -- see BackgroundWork.failure_acknowledged.
+        if work["backgroundCount"] or work["backgroundUnconfirmed"] or (work["backgroundFailure"] and not work["backgroundFailureAcknowledged"]):
             self.terminal = None
         elif self.final_turn_end and not self.tools and not self.gates and not self.error:
             if self.terminal is None:
@@ -225,7 +228,11 @@ class EventState:
             "startedAt": self.started_at,
             "activeTurn": self.active_turn,
             "closed": self.closed,
-            "error": self.error if self.error else (work["backgroundFailure"] if not self.active_turn and self.final_turn_end else None),
+            "error": self.error if self.error else (
+                work["backgroundFailure"]
+                if not self.active_turn and self.final_turn_end and not work["backgroundFailureAcknowledged"]
+                else None
+            ),
             "terminal": None if (work["backgroundCount"] or work["backgroundUnconfirmed"]) else self.terminal,
             "lastEventAt": self.last_event_at,
             "lastExecutionId": self.last_execution_id,

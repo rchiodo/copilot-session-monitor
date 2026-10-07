@@ -338,6 +338,47 @@ async def test_family_persistence_retains_relationships_and_exact_parent_alert_r
     assert "PRIVATE TRANSCRIPT" not in Path(store.file).read_text(encoding="utf-8")
 
 
+async def test_finished_family_restored_from_before_this_process_started_is_hidden_until_genuinely_new_work(tmp_path):
+    store = SessionStore(str(tmp_path / "sessions.json"))
+
+    def create(retained=(), process_started_at_ms=None):
+        async def _emit(key: str, alert: dict[str, Any]) -> None:
+            pass
+
+        return FamilyMonitor("TEST", _emit, retained, process_started_at_ms=process_started_at_ms)
+
+    monitor = create()
+    p = run()
+    await monitor.update([sample("p", p)], {"now": 1000})
+    finish(p)
+    done = await monitor.update([sample("p", p, None, {"busy": False})], {"now": 2000})
+    assert done["sessions"][0]["state"] == "finished"
+    await store.save(done["members"])
+
+    # Bug #1 repro: with no process_started_at_ms (the pre-fix behavior, and
+    # still the default for every other FamilyMonitor caller/test), a
+    # restored "finished" row stays visible forever, regardless of how long
+    # ago it actually finished relative to the current process's lifetime.
+    restored_default = create(await SessionStore(store.file).load())
+    assert restored_default.snapshot()["sessions"][0]["state"] == "finished"
+
+    # Fix: a new process that started well after the row's finishedAt
+    # (simulated here via a "now" far in the future of the saved finishedAt)
+    # hides that stale row entirely instead of showing it as freshly
+    # finished.
+    restored = create(await SessionStore(store.file).load(), process_started_at_ms=50_000)
+    assert restored.snapshot()["sessions"] == []
+
+    # The hidden row re-surfaces once the same family produces genuinely new
+    # completion work (a different dismissKey) after this process started --
+    # the exact same dynamic dismissed-key check "Clear retained" relies on.
+    event(p, "assistant.turn_start", {"interactionId": "fresh", "turnId": "0"})
+    await restored.update([sample("p", p)], {"now": 51000})
+    finish(p)
+    done2 = await restored.update([sample("p", p, None, {"busy": False})], {"now": 52000})
+    assert done2["sessions"][0]["state"] == "finished"
+
+
 def _schema() -> dict[str, Any]:
     return {
         "sessions": [
