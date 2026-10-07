@@ -135,19 +135,22 @@ async def test_idle_ancestor_child_only_run_nested_grandchild_aggregate_without_
     assert len(alerts) == 1
 
 
-async def test_families_order_by_parent_response_never_descendant_or_alert_time_fallback_stable():
+async def test_families_order_and_last_response_reflect_most_recent_member_not_just_parent():
     monitor, alerts, step = rig()
     p, c, other = run(), run(), run()
     event(p, "assistant.message", {"phase": "commentary"})
     event(other, "assistant.message", {"phase": "commentary"})
     event(c, "assistant.message", {"phase": "commentary"})
     view = await step([sample("p", p), sample("c", c, "p"), sample("independent", other)])
-    assert [row["id"] for row in view["sessions"]] == ["independent", "p"]
-    assert view["sessions"][1]["lastResponseAt"] == p.last_response_at
+    # c responded last, so the family card (and its sort position) must reflect
+    # c's time, not just parent p's own (earlier) last response.
+    assert [row["id"] for row in view["sessions"]] == ["p", "independent"]
+    assert view["sessions"][0]["lastResponseAt"] == c.last_response_at
     assert len(group_families(view["members"])) == 2
-    fallback = [{**row, "lastResponseAt": None} if row["id"] == "p" else row for row in view["members"]]
-    assert group_families(fallback)[1]["lastResponseAt"] is None
-    assert group_families(fallback)[1]["firstObservedAt"] == view["sessions"][1]["firstObservedAt"]
+    fallback = [{**row, "lastResponseAt": None} if row["id"] in ("p", "c") else row for row in view["members"]]
+    nulled = group_families(fallback)
+    assert nulled[1]["lastResponseAt"] is None
+    assert nulled[1]["firstObservedAt"] == view["sessions"][0]["firstObservedAt"]
 
 
 async def test_parent_waiting_and_error_alerts_update_independently_while_child_works():

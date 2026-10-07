@@ -113,6 +113,15 @@ def group_families(rows: Iterable[dict[str, Any]], relatives: Iterable[dict[str,
             times = sorted(row["finishedAt"] for row in observed if row.get("finishedAt"))
             finished_at = times[-1] if times else None
 
+        # The parent's own lastResponseAt only reflects messages in the root
+        # session; a family card should reflect the most recent update from
+        # ANY member (the parent or any descendant), so the user can tell at
+        # a glance when the family last did anything at all. This also feeds
+        # sort_sessions(), so a family bubbles up when a child -- not just
+        # the parent -- was the one that last responded.
+        response_times = [row.get("lastResponseAt") for row in group["rows"] if row.get("lastResponseAt")]
+        last_response_at = max(response_times, key=_parse_date) if response_times else None
+
         dismiss_key = None
         if (state == "finished" or state == "unknown") and not group["issue"]:
             canonical = [
@@ -147,6 +156,7 @@ def group_families(rows: Iterable[dict[str, Any]], relatives: Iterable[dict[str,
             **parent,
             "state": state,
             "finishedAt": finished_at,
+            "lastResponseAt": last_response_at,
             "hierarchyIssue": group["issue"],
             "detail": detail,
             "parentAlert": _coalesce(parent.get("lastAlert"), None),

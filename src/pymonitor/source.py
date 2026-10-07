@@ -18,6 +18,7 @@ a real CLI process.
 """
 from __future__ import annotations
 
+import asyncio
 import errno
 import ntpath
 import os
@@ -37,6 +38,16 @@ from .hierarchy import hierarchy_index, related_metadata, selected_hierarchy
 SESSION_ID = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$", re.IGNORECASE)
 
 ProcessSnapshot = Callable[[], dict[str, Any] | None]
+
+# How long poll() will wait inline for a due CLI-session discovery refresh
+# before letting it keep running in the background. Real SDK-backed discovery
+# (_default_sdk_discover) can take 6s+ once ~/.copilot/session-state has many
+# accumulated directories, and poll() gates every SSE broadcast -- so without
+# this budget a slow refresh stalls the whole broadcast loop well past
+# HEARTBEAT_MS. Test doubles (sdk_discover=...) return near-instantly and so
+# finish comfortably inside the budget, preserving the old same-call
+# semantics for them.
+DISCOVERY_INLINE_BUDGET_S = 1.0
 
 
 def _parse_date(value: str | None) -> float:
@@ -169,6 +180,10 @@ class LocalSource:
         self.tracked: set[str] = set()
         self.directory_ids: list[str] = []
         self.discovered_at = 0.0
+        # In-flight background discovery refresh, if the inline budget was
+        # exceeded (see DISCOVERY_INLINE_BUDGET_S and poll()). None when no
+        # refresh is currently running.
+        self._discovery_task: asyncio.Task[list[str]] | None = None
         # Test-only override; production callers rely on the real SDK-backed
         # default (_default_sdk_discover), lazily started on first use.
         self._sdk_discover_override = sdk_discover
@@ -318,12 +333,34 @@ class LocalSource:
                 issues.append(f"{sample['title']}: {sample['readError']}")
             samples.append(sample)
 
-        if now_ms - self.discovered_at > 5000:
+        # Harvest a background discovery refresh left running by a prior poll()
+        # (see below) as soon as it's done, regardless of the 5s gate -- this
+        # is what lets a slow real-SDK call eventually land without ever
+        # blocking a poll cycle for its full duration.
+        if self._discovery_task is not None and self._discovery_task.done():
             try:
-                self.directory_ids = await self._discover_cli_session_ids()
+                self.directory_ids = self._discovery_task.result()
             except Exception as error:  # noqa: BLE001 - SDK/subprocess failures must not crash a poll cycle
                 issues.append(f"CLI session discovery unavailable ({_error_label(error)})")
-            finally:
+            self._discovery_task = None
+            self.discovered_at = now_ms
+
+        if self._discovery_task is None and now_ms - self.discovered_at > 5000:
+            task = asyncio.ensure_future(self._discover_cli_session_ids())
+            try:
+                self.directory_ids = await asyncio.wait_for(asyncio.shield(task), timeout=DISCOVERY_INLINE_BUDGET_S)
+            except TimeoutError:
+                # Still running past the inline budget (e.g. the real SDK's
+                # list_sessions() with many accumulated session directories).
+                # Let it keep going in the background -- shield() kept it
+                # alive despite wait_for()'s timeout-cancellation -- and pick
+                # up its result on a future poll() instead of stalling this
+                # one (and the SSE broadcast it gates) for seconds.
+                self._discovery_task = task
+            except Exception as error:  # noqa: BLE001 - SDK/subprocess failures must not crash a poll cycle
+                issues.append(f"CLI session discovery unavailable ({_error_label(error)})")
+                self.discovered_at = now_ms
+            else:
                 self.discovered_at = now_ms
 
         for id_ in self.directory_ids:
@@ -386,6 +423,13 @@ class LocalSource:
 
     async def aclose(self) -> None:
         """Stop the lazily-started SDK client, if one was created."""
+        if self._discovery_task is not None:
+            self._discovery_task.cancel()
+            try:
+                await self._discovery_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001 - best-effort cleanup only
+                pass
+            self._discovery_task = None
         if self._sdk_client is not None:
             await self._sdk_client.stop()
             self._sdk_client = None
