@@ -231,6 +231,38 @@ async def test_zombie_row_rescue_vs_still_open(fixture: Fixture) -> None:
 
 
 @pytest.mark.asyncio
+async def test_never_corroborated_finish_cannot_later_zombie_rescue(fixture: Fixture) -> None:
+    """A session reported as already 'finished' on the very first report the
+    collector ever sees from a source (no saved track record at all) is
+    correctly distrusted down to 'unknown'. But its `lastAlert` breadcrumb
+    was inherited verbatim from the watcher's own payload and must be
+    cleared on this demotion too -- otherwise a *later* report that simply
+    omits the row (as if the watcher's own retained window aged it out)
+    would wrongly zombie-rescue it back to 'finished' using a timestamp the
+    collector itself never confirmed.
+    """
+    f = fixture
+
+    def with_alert(row: dict[str, Any]) -> dict[str, Any]:
+        return {**row, "lastAlert": {"sessionId": row["id"], "key": f"alert-{row['id']}", "kind": "finished",
+                                      "message": "Current run finished; this is not task or PR success", "at": AT}}
+
+    await f.connect()
+    await f.report(0, [with_alert(member("finished", "done"))])
+
+    def by_source_id(id_: str) -> dict[str, Any]:
+        source = f.collector.sources[f.identities[0]["reporterId"]]
+        return next(row for row in source["members"] if row["id"] == id_)
+
+    assert by_source_id("done")["state"] == "unknown", \
+        "never-before-seen 'finished' has no track record and cannot be trusted on sight"
+
+    await f.report(0, [])
+    assert by_source_id("done")["state"] == "unknown", \
+        "a never-corroborated completion must not resurrect once the watcher simply omits the row"
+
+
+@pytest.mark.asyncio
 async def test_parent_descendant_restores_dismissed_and_stale_revision_skips(tmp_path: Path) -> None:
     for child in (False, True):
         f = await make_fixture(tmp_path / f"pd-{child}")

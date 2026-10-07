@@ -336,7 +336,22 @@ class Collector:
                     rows.append(member)
                     continue
                 source["recoveryVotes"][row["id"]] = {"runId": row.get("runId"), "startedAt": row.get("startedAt"), "count": votes}
-            rows.append(_unknown(member, "Completion occurred outside continuous collector observation; not confirmed"))
+            demoted = member
+            if saved is None:
+                # First-ever sight of this id from this source: the collector
+                # has no track record for it at all, so any lastAlert carried
+                # through from the watcher's own report is an uncorroborated
+                # breadcrumb (e.g. the session legitimately finished on the
+                # watcher's machine days before the collector ever started
+                # watching it). Clear it so a later "watcher omitted this
+                # retained member" report can never zombie-rescue it back to
+                # 'finished' using a timestamp the collector itself never
+                # confirmed. Rows the collector already has a saved track
+                # record for (recovery votes in progress) keep their
+                # lastAlert untouched -- that breadcrumb was already subject
+                # to this same scrutiny on a prior report.
+                demoted = {**member, "lastAlert": None}
+            rows.append(_unknown(demoted, "Completion occurred outside continuous collector observation; not confirmed"))
 
         # See module docstring (baseline vs. continuous trust / zombie-row
         # rescue): a retained member the fresh report omitted.
