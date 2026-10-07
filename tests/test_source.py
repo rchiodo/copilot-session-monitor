@@ -375,3 +375,93 @@ async def test_historical_open_background_work_from_a_different_owner_lifetime_i
     row = next(row for row in result["samples"] if row["id"] == LOCAL_ID)
     assert row["busy"] is False
     assert re.search("ownership", row["activityUnconfirmed"])
+
+
+async def test_background_work_with_no_recent_activity_goes_stale_to_unconfirmed_not_working(fixture):
+    """A background shell the agent never re-checks must not read "Working"
+    forever just because its owning process is still alive. Repro for the
+    real-world "Unchanged save progress" session: backgroundAt is after the
+    owner's startedAt (so it isn't the pre-existing owner-predates case), but
+    is older than the staleness window with nothing newer to corroborate it.
+    """
+    home, file = fixture["home"], fixture["file"]
+    # Both owner and parent need to predate the stale-but-not-ancient event, and
+    # parent must still predate owner (ownership-matching invariant in owner()).
+    owner = {**fixture["owner"], "startedAt": _iso(-2_000_000)}
+    parent = {**fixture["parent"], "startedAt": _iso(-2_100_000)}
+    conn = sqlite3.connect(file)
+    conn.execute("UPDATE sessions SET is_running=0")
+    conn.commit()
+    conn.close()
+    stale_at = _iso(-1_000_000)  # after owner start, but past the 15-minute staleness window
+    background = _events_blob(
+        [
+            {
+                "id": "launch",
+                "type": "tool.execution_start",
+                "data": {"toolName": "powershell", "toolCallId": "shell", "arguments": {}},
+                "timestamp": stale_at,
+            },
+            {
+                "id": "running",
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": "shell",
+                    "success": True,
+                    "result": {
+                        "content": "<command with shellId: shell-a is still running after 180 seconds. No output yet.>"
+                    },
+                },
+                "timestamp": stale_at,
+            },
+        ]
+    )
+    with (Path(home) / "session-state" / LOCAL_ID / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(background)
+    await _finish_turn(home, LOCAL_ID)
+    result = await LocalSource(home, lambda: {"at": time.time() * 1000, "processes": [owner, parent]}).poll()
+    row = next(row for row in result["samples"] if row["id"] == LOCAL_ID)
+    assert row["events"]["backgroundCount"] == 1
+    assert row["busy"] is False
+    assert re.search("ownership", row["activityUnconfirmed"])
+
+
+async def test_background_work_within_staleness_window_still_reads_working(fixture):
+    """Counterpart to the staleness test above: a background shell observed
+    recently (well within the 15-minute window) must keep reading "Working",
+    proving this isn't a blanket suppression of background busy signals.
+    """
+    home, file, owner, parent = fixture["home"], fixture["file"], fixture["owner"], fixture["parent"]
+    conn = sqlite3.connect(file)
+    conn.execute("UPDATE sessions SET is_running=0")
+    conn.commit()
+    conn.close()
+    background = _events_blob(
+        [
+            {
+                "id": "launch",
+                "type": "tool.execution_start",
+                "data": {"toolName": "powershell", "toolCallId": "shell", "arguments": {}},
+                "timestamp": _now_iso(),
+            },
+            {
+                "id": "running",
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": "shell",
+                    "success": True,
+                    "result": {
+                        "content": "<command with shellId: shell-a is still running after 180 seconds. No output yet.>"
+                    },
+                },
+                "timestamp": _now_iso(),
+            },
+        ]
+    )
+    with (Path(home) / "session-state" / LOCAL_ID / "events.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(background)
+    await _finish_turn(home, LOCAL_ID)
+    result = await LocalSource(home, lambda: {"at": time.time() * 1000, "processes": [owner, parent]}).poll()
+    row = next(row for row in result["samples"] if row["id"] == LOCAL_ID)
+    assert row["busy"] is True
+    assert row["activityUnconfirmed"] is None

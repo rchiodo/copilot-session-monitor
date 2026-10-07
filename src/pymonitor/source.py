@@ -67,18 +67,31 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
-def _activity(events: dict[str, Any], owner: dict[str, Any]) -> dict[str, Any]:
+# Background shells rarely get a corroborating completion event (the runtime seldom
+# emits shell_completed notifications in practice -- see docs/porting-notes.md). Without
+# any age-based decay, a shell the agent never re-checks stays "busy" forever as long as
+# its owning process is alive. activeTurn/lastExecutionAt don't need the same decay: they
+# are explicit state-machine flags that always flip off on an explicit turn_end/error/
+# abort/shutdown event, so a long but genuinely still-active single turn isn't mistaken
+# for staleness.
+BACKGROUND_STALE_MS = 15 * 60 * 1000  # 15 minutes
+
+
+def _activity(events: dict[str, Any], owner: dict[str, Any], now_ms: float) -> dict[str, Any]:
     def current(at: str | None) -> bool:
         return bool(at) and _parse_date(at) >= _parse_date(owner["startedAt"])
+
+    def background_active(at: str | None) -> bool:
+        return current(at) and (now_ms - _parse_date(at)) <= BACKGROUND_STALE_MS
 
     background = (events.get("backgroundCount") or 0) > 0
     foreground = bool(events.get("activeTurn") or (events.get("activeTools") or 0) > 0) and not events.get("terminal")
     busy = (not events.get("closed")) and (
-        (background and current(events.get("backgroundAt"))) or (foreground and current(events.get("lastExecutionAt")))
+        (background and background_active(events.get("backgroundAt"))) or (foreground and current(events.get("lastExecutionAt")))
     )
     activity_unconfirmed = (
         "Outstanding background work lacks confirmed current ownership or lifecycle evidence"
-        if events.get("backgroundUnconfirmed") or (background and not current(events.get("backgroundAt")))
+        if events.get("backgroundUnconfirmed") or (background and not background_active(events.get("backgroundAt")))
         else None
     )
     completion_unconfirmed = (
@@ -224,7 +237,7 @@ class LocalSource:
             self.live_ids.add(row["id"])
             tail = self.tails.setdefault(row["id"], JsonlTail(os.path.join(self.root, row["id"], "events.jsonl")))
             events = await tail.read()
-            return {"owner": owner, "events": events, **_activity(events, owner)}
+            return {"owner": owner, "events": events, **_activity(events, owner, now_ms)}
 
         # A foreground-idle session can still own an attached command or background agent.
         # Probe live local owners, but retain only actual work/uncertainty, not idle history.
