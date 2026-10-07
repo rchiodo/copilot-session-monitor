@@ -167,10 +167,16 @@ function render() {
       `${source.label} (${source.id.slice(0, 8)}): ${source.healthy ? 'Connected' : 'UNAVAILABLE / Unconfirmed'}; last received: ${time(source.lastSeen)}${source.issues.length ? `. ${source.issues.join('; ')}` : ''}`)
       .join('\n') || 'No watchers paired. This is not evidence that other machines are idle.';
   }
+  const notificationFailed = state.notification?.state === 'failed';
+  const unhealthy = !state.healthy || state.issues.length > 0;
   $('health').textContent = state.healthy
     ? (state.issues.length ? `Observing with limitations: ${state.issues.join('; ')}` : 'Live local observer connected')
     : `Status unavailable - no completion inferred. ${state.issues.join('; ')}`;
-  $('health').className = state.healthy && !state.issues.length ? 'connected' : 'warning';
+  if (notificationFailed) {
+    $('health').textContent += ` Windows notification delivery failed: ${state.notification.message}`;
+  }
+  $('health').className = unhealthy ? 'warning' : 'connected';
+  $('health').hidden = !unhealthy && !notificationFailed;
   const focused = document.activeElement;
   for (const [id, items] of [['running', running], ['retained', retained]]) {
     const list = $(id);
@@ -223,6 +229,7 @@ async function loadStatus() {
     }
     $('health').textContent = 'Monitor disconnected. Run Start-Tray.ps1 /host to reconnect. No completion inferred.';
     $('health').className = 'warning';
+    $('health').hidden = false;
     document.title = 'Status unavailable - Copilot session monitor';
   }
 }
@@ -286,10 +293,12 @@ $('stop').addEventListener('click', async () => {
     }
     $('health').textContent = 'Collector stopped. Watchers may keep retrying. Copilot sessions were not changed.';
     $('health').className = 'warning';
+    $('health').hidden = false;
     $('stop').disabled = true;
     document.title = 'Stopped - Copilot session monitor';
   } catch (error) {
     $('health').textContent = error.message;
+    $('health').hidden = false;
   }
 });
 refresh();

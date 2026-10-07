@@ -10,27 +10,14 @@
 <body>
   <main>
     <header>
-      <div><p class="eyebrow">LOCAL COPILOT SESSION MONITOR</p><h1>Session families <span id="count">0</span></h1></div>
-      <button id="test" type="button">Test notification</button>
+      <h1>Session families <span id="count">0</span></h1>
+      <button id="stop" class="secondary" type="button">Stop collector</button>
     </header>
-    <div class="context">
-      <p id="coverage" class="muted">Connecting to this machine...</p>
-      <p id="theme" class="muted">Reading Windows app theme...</p>
-    </div>
-    <div id="health" role="status">Starting observer...</div>
-    <details id="source-health" class="source-health" hidden>
-      <summary id="source-summary">Paired source coverage</summary>
-      <p id="source-details"></p>
-    </details>
-    <div class="list-guide muted">
-      <p id="summary"></p>
-      <p>Parent's newest response first; first-seen fallback when none. Expand for member status.</p>
-    </div>
+    <div id="health" role="status" hidden>Starting observer...</div>
     <p id="dismiss-result" class="muted" role="status" tabindex="-1" hidden></p>
     <div class="session-columns">
       <section class="session-column" aria-labelledby="running-heading">
         <h2 id="running-heading" class="column-heading">Running <span id="running-count" class="column-count">0</span></h2>
-        <p class="muted">Parent or any observed descendant is working.</p>
         <div id="running"></div>
         <p id="running-empty" class="empty-state" hidden>No sessions currently observed running.</p>
       </section>
@@ -38,23 +25,35 @@
         <h2 id="retained-heading" class="column-heading">Finished / Needs input <span id="retained-count" class="column-count">0</span>
           <button id="clear-finished" type="button" disabled title="Dismiss finished and unconfirmed entries from this monitor only. Copilot sessions and files are unchanged.">Clear retained</button>
         </h2>
-        <p class="muted">Errors/waiting stay. Finished and unconfirmed rows can be dismissed individually (monitor-only).</p>
         <div id="retained"></div>
         <p id="retained-empty" class="empty-state" hidden>No finished or attention-needed families to show.</p>
       </section>
     </div>
-    <section class="notification">
-      <h2>Windows notifications</h2>
-      <p id="notification" role="status">Checking notification helper...</p>
-      <p class="muted">Notifications appear on this collector PC. Watchers and collector keep running without browsers or Copilot chats.</p>
-    </section>
-    <footer>
-      <p>A completion alert means <strong>all observed family runs finished</strong>, not that the entire task or PR succeeded. The card's parent alert is separate.</p>
-      <p>Only explicitly paired Windows watchers are covered. Source labels identify machines; unavailable sources are never assumed finished. CLI coverage is activity-only.</p>
-      <p>Dismiss hides a finished or unconfirmed monitor entry until new family work is observed. It never deletes Copilot sessions, files, history or worktrees. Expand for all known linked descendant names; unobserved execution is labeled explicitly.</p>
-      <p id="updated"></p>
-      <button id="stop" class="secondary" type="button">Stop collector</button>
-    </footer>
+    <details id="page-details" class="page-details">
+      <summary>Details</summary>
+      <button id="test" type="button">Test notification</button>
+      <p id="coverage" class="muted">Connecting to this machine...</p>
+      <p id="theme" class="muted">Reading Windows app theme...</p>
+      <details id="source-health" class="source-health" hidden>
+        <summary id="source-summary">Paired source coverage</summary>
+        <p id="source-details"></p>
+      </details>
+      <div class="list-guide muted">
+        <p id="summary"></p>
+        <p>Parent's newest response first; first-seen fallback when none. Expand for member status.</p>
+      </div>
+      <section class="notification">
+        <h2>Windows notifications</h2>
+        <p id="notification" role="status">Checking notification helper...</p>
+        <p class="muted">Notifications appear on this collector PC. Watchers and collector keep running without browsers or Copilot chats.</p>
+      </section>
+      <footer>
+        <p>A completion alert means <strong>all observed family runs finished</strong>, not that the entire task or PR succeeded. The card's parent alert is separate.</p>
+        <p>Only explicitly paired Windows watchers are covered. Source labels identify machines; unavailable sources are never assumed finished. CLI coverage is activity-only.</p>
+        <p>Dismiss hides a finished or unconfirmed monitor entry until new family work is observed. It never deletes Copilot sessions, files, history or worktrees. Expand for all known linked descendant names; unobserved execution is labeled explicitly.</p>
+        <p id="updated"></p>
+      </footer>
+    </details>
   </main>
 </body>
 </html>

@@ -121,6 +121,10 @@ Revocation preserves retained metadata but makes that source unavailable. It doe
 
 ## Reading the dashboard
 
+The main page shows little beyond the two session columns: a header (title, family count, **Stop collector**), a status banner that is hidden whenever everything is healthy, and the columns themselves. Everything else — the Test notification button, source coverage, theme detection, the summary/guide text, the Windows notifications explainer, footer disclaimers, and the last-updated timestamp — lives in a collapsed **Details** section below the columns; expand it for that context, it is not needed for day-to-day monitoring.
+
+The status banner auto-appears only when there is something to act on: the collector is unhealthy or reports issues, or Windows notification delivery has failed. It stays hidden otherwise, including the ordinary "connected and nothing wrong" state — the two populated columns already imply health.
+
 Two compact columns show **Running** and **Finished / Needs input**. The latter also contains distinct **Error**, **Interrupted**, and **Unconfirmed** states; placement alone is not proof of completion.
 
 Each card is one canonical parent plus linked descendants **on that source**. A working parent or any observed descendant keeps the family Working, including attached PowerShell commands or task agents after the foreground model stops. Stable reporter IDs namespace every session/family ID, so copied session IDs and duplicate hostnames never merge. Cross-machine parent links are not guessed.

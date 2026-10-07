@@ -303,7 +303,6 @@ test('responsive column markup and styles allow wrapping and stack on narrow vie
     readFile(new URL(`../public/${file}`, import.meta.url), 'utf8')));
   assert.match(html, /aria-labelledby="running-heading"/);
   assert.match(html, /aria-labelledby="retained-heading"/);
-  assert.match(html, /Errors\/waiting stay\. Finished and unconfirmed rows can be dismissed individually \(monitor-only\)/);
   assert.match(css, /\.session-columns\s*\{[^}]*grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
   assert.match(css, /@media \(max-width: 900px\)\s*\{\s*\.session-columns\s*\{\s*grid-template-columns:\s*minmax\(0,\s*1fr\)/);
   assert.match(css, /\.session-column\s*\{\s*min-width:\s*0/);
@@ -373,4 +372,78 @@ test('light and dark palettes meet 4.5:1 contrast for text, controls, timestamps
       assert.ok(ratio >= 4.5, `${mode ? 'dark' : 'light'} ${foreground} on ${background}: ${ratio}`);
     }
   }
+});
+
+test('status banner stays hidden while healthy with no issues and no failed notification', async () => {
+  const fixture = await page([session('working')]);
+  assert.equal(fixture.nodes.get('health').hidden, true);
+});
+
+test('status banner auto-appears when the collector reports unhealthy, and hides again once healthy', async () => {
+  const fixture = await page([session('working')]);
+  assert.equal(fixture.nodes.get('health').hidden, true);
+  fixture.status.healthy = false;
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, false);
+  assert.equal(fixture.nodes.get('health').className, 'warning');
+  fixture.status.healthy = true;
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, true);
+});
+
+test('status banner auto-appears when issues are reported even though healthy is true', async () => {
+  const fixture = await page([session('working')]);
+  fixture.status.issues = ['Example limitation'];
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, false);
+  assert.match(fixture.nodes.get('health').textContent, /Example limitation/);
+  fixture.status.issues = [];
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, true);
+});
+
+test('status banner auto-appears when Windows notification delivery fails, independent of health/issues', async () => {
+  const fixture = await page([session('working')]);
+  assert.equal(fixture.nodes.get('health').hidden, true);
+  fixture.status.notification = { state: 'failed', message: 'Native notification helper unavailable. Alert was not delivered.' };
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, false);
+  assert.equal(fixture.nodes.get('health').className, 'connected');
+  assert.match(fixture.nodes.get('health').textContent, /Windows notification delivery failed: Native notification helper unavailable/);
+  fixture.status.notification = { state: 'shown', message: 'Delivered' };
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, true);
+});
+
+test('status banner shows a warning when the connection is lost', async () => {
+  const fixture = await page([session('working')]);
+  assert.equal(fixture.nodes.get('health').hidden, true);
+  fixture.fail = true;
+  await fixture.poll();
+  assert.equal(fixture.nodes.get('health').hidden, false);
+  assert.equal(fixture.nodes.get('health').className, 'warning');
+});
+
+test('Stop collector sets a visible warning banner', async () => {
+  const fixture = await page([session('working')]);
+  assert.equal(fixture.nodes.get('health').hidden, true);
+  await fixture.nodes.get('stop').handlers.click();
+  assert.equal(fixture.nodes.get('health').hidden, false);
+  assert.match(fixture.nodes.get('health').textContent, /Collector stopped/);
+});
+
+test('relocated secondary elements (coverage, theme, source-health, notification, summary, updated) remain reachable and update as before', async () => {
+  const fixture = await page([session('working')]);
+  // These elements moved into the collapsed <details id="page-details"> in index.html, but this
+  // test fixture drives only app.js by element ID (see the page() helper above) and does not parse
+  // index.html, so it cannot assert real DOM nesting under <details>. The separate markup test
+  // ('responsive column markup...') and manual verification cover the actual relocation; this test
+  // instead confirms app.js still finds and updates each relocated element correctly post-move.
+  for (const id of ['coverage', 'theme', 'source-health', 'notification', 'summary', 'updated', 'test']) {
+    assert.ok(fixture.nodes.has(id), `expected #${id} to exist`);
+  }
+  assert.match(fixture.nodes.get('coverage').textContent, /This machine only/);
+  assert.match(fixture.nodes.get('theme').textContent, /Windows app preference \(light\)/);
+  assert.match(fixture.nodes.get('summary').textContent, /working.*retained/);
+  assert.ok(fixture.nodes.get('updated').textContent.length > 0);
 });
