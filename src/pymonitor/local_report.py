@@ -18,6 +18,24 @@ from .source import LocalSource, ProcessSnapshot
 
 NoticeFn = Callable[[dict[str, Any]], None]
 
+# Tolerate this many *consecutive* poll() failures before forcing every
+# tracked family to "unknown" via monitor.update([], healthy=False).
+#
+# source.py's LocalSource.poll() raises whenever tray_native.py's process
+# snapshot (refreshed roughly every 2s via call_soon_threadsafe) is more
+# than 8000ms stale, which can happen for a single poll_local() tick (polls
+# run every ~1.5s) if the asyncio event loop is briefly busy -- a transient
+# hiccup, not a real observation outage. Forcing healthy=False straight into
+# the engine bypasses its own >15s gap tolerance (721b02c) and flips every
+# already-settled family (including "finished" ones) to "unknown" for that
+# one cycle, which in turn changes families.py's dismissKey and silently
+# breaks "Clear retained" for anything dismissed around that moment.
+#
+# Escalating only after a short run of consecutive failures preserves a
+# single bad tick's "previous confirmed state" while still forcing the
+# unavailable-sweep if the underlying problem actually persists.
+_TRANSIENT_FAILURE_GRACE_CYCLES = 2
+
 
 def create_local_observer(
     label: str,
@@ -41,14 +59,24 @@ async def poll_local(ctx: dict[str, Any], forced_gap_reason: str | None = None) 
     issues: list[str] = []
     healthy = True
     samples: list[dict[str, Any]] = []
+    if forced_gap_reason:
+        # An explicit, caller-requested discard (e.g. server.py/watcher.py's
+        # `local_reset`, set after a pairing/connection change) -- this is a
+        # deliberate "stop trusting prior state" signal, not a transient
+        # observation glitch, so it must always escalate immediately rather
+        # than going through the consecutive-failure grace window below.
+        healthy = False
+        issues = [f"Local observation unavailable ({forced_gap_reason}); no completion inferred"]
+        source.consecutive_failures = 0
+        result = await monitor.update([], {"healthy": False, "reason": issues[0]})
+        return {"result": result, "issues": issues, "healthy": healthy, "samples": samples}
     try:
-        if forced_gap_reason:
-            raise RuntimeError(forced_gap_reason)
         observed = await source.poll()
         samples = observed["samples"]
         result = await monitor.update(observed["samples"], {"relatives": observed["relatives"]})
         issues = observed["issues"]
         healthy = not result["gap"]
+        source.consecutive_failures = 0
         for id_ in monitor.rows.keys():
             source.tracked.add(id_)
         source.release_idle(set(monitor.rows.keys()))
@@ -56,7 +84,16 @@ async def poll_local(ctx: dict[str, Any], forced_gap_reason: str | None = None) 
         healthy = False
         label = str(error) or type(error).__name__
         issues = [f"Local observation unavailable ({label}); no completion inferred"]
-        result = await monitor.update([], {"healthy": False, "reason": issues[0]})
+        source.consecutive_failures += 1
+        if source.consecutive_failures > _TRANSIENT_FAILURE_GRACE_CYCLES:
+            result = await monitor.update([], {"healthy": False, "reason": issues[0]})
+        else:
+            # Still within the grace window: report the failure for this
+            # cycle's "issues"/"healthy" fields, but leave every family's
+            # confirmed state exactly as it was -- don't let one transient
+            # tick discard completion authority (see module docstring above
+            # and the _TRANSIENT_FAILURE_GRACE_CYCLES comment).
+            result = monitor.snapshot()
     return {"result": result, "issues": issues, "healthy": healthy, "samples": samples}
 
 

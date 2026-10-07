@@ -160,6 +160,12 @@ class LocalSource:
         # default (_default_sdk_discover), lazily started on first use.
         self._sdk_discover_override = sdk_discover
         self._sdk_client: Any | None = None
+        # Consecutive poll() failures, tracked here (rather than per-call
+        # state in local_report.py) because both server.py and watcher.py
+        # may rebuild their ctx dict on every poll -- this object is the one
+        # thing that's guaranteed to persist across polls in both call sites.
+        # See poll_local()'s transient-failure grace window.
+        self.consecutive_failures = 0
 
     async def owner(self, id_: str, processes: list[dict[str, Any]], desktop: bool) -> dict[str, Any] | None:
         dir_ = os.path.join(self.root, id_)
