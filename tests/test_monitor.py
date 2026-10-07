@@ -498,6 +498,46 @@ async def test_standalone_cli_model_completion_claims_full_run_completion_same_a
     assert r.alerts[0]["kind"] == "finished"
 
 
+async def test_cli_only_session_with_genuine_background_work_stays_working_after_turn_ends():
+    r = rig()
+    s = state(start())
+    assert len((await r.engine.update([sample(s, {"source": "CLI (activity only)"})], now=1000))["active"]) == 1
+
+    # Launch a non-detached background shell, then let the foreground turn end
+    # while the shell keeps running -- a common, legitimate "still working"
+    # state for a CLI-only session (e.g. a long shell command outliving the
+    # model's final response).
+    s.accept(
+        event(
+            "tool.execution_start",
+            {"toolName": "powershell", "toolCallId": "launch", "arguments": {"detach": False, "mode": "async"}},
+        )
+    )
+    s.accept(
+        event(
+            "tool.execution_complete",
+            {"toolCallId": "launch", "success": True, "result": {"content": "<command started in background with shellId: shell-a>"}},
+        )
+    )
+    s.accept(message())
+    s.accept(end())
+
+    snap = s.snapshot()
+    assert snap["activeTurn"] is False
+    assert snap["backgroundCount"] == 1
+
+    row = sample(s, {"source": "CLI (activity only)", "busy": snap["activeTurn"]})
+    view = await r.engine.update([row], now=2000)
+    assert view["sessions"][0]["state"] == "working"
+    assert len(view["active"]) == 1
+
+    # Stays "working" (not "unknown") across subsequent polls while the shell
+    # is still outstanding.
+    view2 = await r.engine.update([row], now=3000)
+    assert view2["sessions"][0]["state"] == "working"
+    assert len(r.alerts) == 0
+
+
 def test_nested_subagent_events_cannot_finish_root_replay_event_ids_are_ignored():
     e = start()
     s = state(e, e)

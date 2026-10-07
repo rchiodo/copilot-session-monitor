@@ -480,11 +480,6 @@ class MonitorEngine:
                 continue
 
             if busy and e.get("runId") and not e.get("partial"):
-                if sample.get("source") == "CLI (activity only)" and not e.get("activeTurn"):
-                    if saved:
-                        retain("unknown", "Model turn ended; full CLI run status is unavailable")
-                    self.observed.pop(id_, None)
-                    continue
                 terminal_at_observation = (
                     previous.get("terminalAtObservation")
                     if previous and previous.get("runId") == e.get("runId")
