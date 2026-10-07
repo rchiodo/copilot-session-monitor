@@ -13,6 +13,11 @@
       <h1>Session families <span id="count">0</span></h1>
       <button id="stop" class="secondary" type="button">Stop collector</button>
     </header>
+    <section id="machines" class="machines-section" aria-labelledby="machines-heading" hidden>
+      <h2 id="machines-heading" class="column-heading">Machines <span id="machines-count" class="column-count">0/0</span></h2>
+      <div id="machines-list"></div>
+      <p id="machines-empty" class="muted" hidden>No watchers paired. This machine's own sessions are still observed directly.</p>
+    </section>
     <div id="health" role="status" hidden>Starting observer...</div>
     <p id="dismiss-result" class="muted" role="status" tabindex="-1" hidden></p>
     <div class="session-columns">
@@ -34,6 +39,7 @@
       <button id="test" type="button">Test notification</button>
       <p id="coverage" class="muted">Connecting to this machine...</p>
       <p id="theme" class="muted">Reading Windows app theme...</p>
+      <p id="issues-log" class="muted"></p>
       <details id="source-health" class="source-health" hidden>
         <summary id="source-summary">Paired source coverage</summary>
         <p id="source-details"></p>

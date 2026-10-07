@@ -41,9 +41,14 @@ button.secondary { background: transparent; font-size: 12px; }
 #health { border-radius: 6px; padding: 6px 10px; margin: 8px 0; font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
 .connected { background: var(--working-bg); color: var(--working-text); }
 .warning { background: var(--warning-bg); color: var(--warning-text); }
+.machines-section { margin: 8px 0 12px; }
+.machines-section .column-heading { font-size: 16px; margin-bottom: 6px; }
+#machines-list { display: flex; flex-wrap: wrap; gap: 6px 10px; }
+.machine-row { margin: 0; padding: 3px 9px; border-radius: 6px; font-size: 13px; line-height: 18px; overflow-wrap: anywhere; }
 .source-health { margin: 4px 0; font-size: 13px; color: var(--muted); }
 .source-health summary { cursor: pointer; }
 #source-details { white-space: pre-line; overflow-wrap: anywhere; margin: 4px 0; }
+#issues-log { white-space: pre-line; overflow-wrap: anywhere; }
 .page-details { margin: 12px 0; font-size: 13px; color: var(--muted); }
 .page-details > summary { cursor: pointer; margin-bottom: 8px; }
 .page-details #test { margin-bottom: 8px; }

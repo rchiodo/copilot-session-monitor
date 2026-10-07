@@ -159,24 +159,40 @@ function render() {
     !sessions.some(item => ['finished', 'unknown'].includes(item.state) && item.dismissKey);
   $('coverage').textContent = `${state.healthy ? state.coverage : 'Live source coverage unavailable'} | ${state.machine} | Read-only observation`;
   $('source-health').hidden = !state.sources;
+  let sources;
   if (state.sources) {
-    const sources = state.sources.map(source => state.healthy ? source
+    sources = state.sources.map(source => state.healthy ? source
       : { ...source, healthy: false, issues: ['Collector disconnected; cached source status is unconfirmed'] });
     $('source-summary').textContent = `${sources.filter(source => source.healthy).length}/${sources.length} paired sources connected (expand coverage)`;
     $('source-details').textContent = sources.map(source =>
       `${source.label} (${source.id.slice(0, 8)}): ${source.healthy ? 'Connected' : 'UNAVAILABLE / Unconfirmed'}; last received: ${time(source.lastSeen)}${source.issues.length ? `. ${source.issues.join('; ')}` : ''}`)
       .join('\n') || 'No watchers paired. This is not evidence that other machines are idle.';
   }
+  $('machines').hidden = !sources;
+  if (sources) {
+    $('machines-count').textContent = `${sources.filter(source => source.healthy).length}/${sources.length}`;
+    const list = $('machines-list');
+    for (const child of [...list.children]) child.remove();
+    for (const source of sources) {
+      const row = document.createElement('p');
+      row.className = `machine-row ${source.healthy ? 'connected' : 'warning'}`;
+      row.textContent = `${source.label} - ${source.healthy ? 'Connected' : 'Not connected'} - last seen ${time(source.lastSeen, true)}`;
+      list.append(row);
+    }
+    $('machines-empty').hidden = sources.length > 0;
+  }
   const notificationFailed = state.notification?.state === 'failed';
   const unhealthy = !state.healthy || state.issues.length > 0;
-  $('health').textContent = state.healthy
-    ? (state.issues.length ? `Observing with limitations: ${state.issues.join('; ')}` : 'Live local observer connected')
-    : `Status unavailable - no completion inferred. ${state.issues.join('; ')}`;
-  if (notificationFailed) {
-    $('health').textContent += ` Windows notification delivery failed: ${state.notification.message}`;
-  }
+  const problemCount = state.issues.length + (notificationFailed ? 1 : 0);
+  const plural = problemCount === 1 ? 'issue' : 'issues';
+  $('health').textContent = !state.healthy
+    ? `Status unavailable - no completion inferred${problemCount ? ` (${problemCount} ${plural} - see Details)` : ''}`
+    : problemCount ? `Observing with limitations (${problemCount} ${plural}) - see Details` : 'Live local observer connected';
   $('health').className = unhealthy ? 'warning' : 'connected';
   $('health').hidden = !unhealthy && !notificationFailed;
+  const logLines = [...state.issues];
+  if (notificationFailed) logLines.push(`Windows notification delivery failed: ${state.notification.message}`);
+  $('issues-log').textContent = logLines.length ? logLines.join('\n') : 'No issues reported.';
   const focused = document.activeElement;
   for (const [id, items] of [['running', running], ['retained', retained]]) {
     const list = $(id);
