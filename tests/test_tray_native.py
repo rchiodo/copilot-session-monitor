@@ -13,6 +13,7 @@ and `psutil` process enumeration need faking here.
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -21,6 +22,15 @@ import pytest
 
 from pymonitor import tray_native as tn
 from pymonitor.tray_native import CollectorNativeTray, WatcherNativeTray
+
+# `tn.threading` *is* the real `threading` module (not a copy), and the
+# autouse `_fake_icon` fixture below monkeypatches `threading.Thread` itself
+# so bridge `.start()` calls don't spin up real tray/worker threads in tests
+# that aren't specifically testing them. Capture the real class here, before
+# any fixture can replace it, so tests proving genuine off-thread execution
+# can restore it (reading `threading.Thread` *after* that fixture has run
+# would just return the fake it was overwritten with).
+_REAL_THREAD = threading.Thread
 
 
 def _fake_server() -> MagicMock:
@@ -405,3 +415,126 @@ def test_label_dialog_passes_through_typed_value(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(tn.simpledialog, "askstring", lambda *a, **k: "laptop-2")
     monkeypatch.setattr(tn.tk, "Tk", lambda: MagicMock())
     assert tn._run_label_dialog() == "laptop-2"
+
+
+# -- dedicated-thread Tk/pystray fix (both dialogs run their Tk body off ---
+# -- the calling thread, since pystray's icon thread already drives its ----
+# -- own native Win32 message pump -- see _run_in_dedicated_thread) --------
+
+
+def test_run_in_dedicated_thread_returns_body_result() -> None:
+    assert tn._run_in_dedicated_thread(lambda: "value") == "value"
+
+
+def test_run_in_dedicated_thread_reraises_body_exception() -> None:
+    def _boom() -> str:
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError, match="boom"):
+        tn._run_in_dedicated_thread(_boom)
+
+
+def test_run_in_dedicated_thread_executes_body_off_caller_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The file's autouse `_fake_icon` fixture fakes `tn.threading.Thread` so
+    # that `.start()` just runs the target synchronously (so bridge .start()
+    # calls don't spin up real tray/worker threads in other tests). Restore
+    # the real `threading.Thread` here since this test specifically proves
+    # the dedicated-thread behavior.
+    monkeypatch.setattr(tn.threading, "Thread", _REAL_THREAD)
+    seen: list[int] = []
+    caller_thread = threading.get_ident()
+    tn._run_in_dedicated_thread(lambda: seen.append(threading.get_ident()))
+    assert seen and seen[0] != caller_thread
+
+
+def test_label_dialog_runs_tk_on_a_dedicated_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tn.threading, "Thread", _REAL_THREAD)
+    seen: list[int] = []
+
+    def _fake_tk() -> MagicMock:
+        seen.append(threading.get_ident())
+        return MagicMock()
+
+    monkeypatch.setattr(tn.tk, "Tk", _fake_tk)
+    monkeypatch.setattr(tn.simpledialog, "askstring", lambda *a, **k: "laptop-2")
+    assert tn._run_label_dialog() == "laptop-2"
+    assert seen and seen[0] != threading.get_ident()
+
+
+def _stub_connection_dialog_tk(
+    monkeypatch: pytest.MonkeyPatch, *, text_value: str, click: str
+) -> MagicMock:
+    """Replace every tk widget constructor `_run_connection_dialog`'s body
+    touches with lightweight fakes, and have `root.wait_window()` invoke
+    the captured OK/Cancel button `command` callback -- mirroring what a
+    real Tk event loop would do once the user clicks that button -- since
+    no real Tk event loop runs under test."""
+    commands: dict[str, Any] = {}
+
+    class _FakeText:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def pack(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def get(self, *a: Any, **k: Any) -> str:
+            return text_value
+
+    class _FakeButton:
+        def __init__(self, *a: Any, text: str = "", command: Any = None, **k: Any) -> None:
+            if command is not None:
+                commands[text] = command
+
+        def pack(self, *a: Any, **k: Any) -> None:
+            pass
+
+    class _FakeWidget:
+        def __init__(self, *a: Any, **k: Any) -> None:
+            pass
+
+        def pack(self, *a: Any, **k: Any) -> None:
+            pass
+
+    root = MagicMock()
+    root.wait_window.side_effect = lambda _dialog: commands[click]()
+    monkeypatch.setattr(tn.tk, "Tk", lambda: root)
+    monkeypatch.setattr(tn.tk, "Toplevel", lambda *a, **k: MagicMock())
+    monkeypatch.setattr(tn.tk, "Label", _FakeWidget)
+    monkeypatch.setattr(tn.tk, "Text", _FakeText)
+    monkeypatch.setattr(tn.tk, "Frame", _FakeWidget)
+    monkeypatch.setattr(tn.tk, "Button", _FakeButton)
+    return root
+
+
+def test_connection_dialog_ok_returns_pasted_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_connection_dialog_tk(monkeypatch, text_value="csm1:abc\n", click="OK")
+    assert tn._run_connection_dialog() == "csm1:abc"
+
+
+def test_connection_dialog_ok_blank_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unlike the label dialog, a blank paste on OK still returns None --
+    the caller treats that as a genuine abort, not "proceed with blank"."""
+    _stub_connection_dialog_tk(monkeypatch, text_value="   \n", click="OK")
+    assert tn._run_connection_dialog() is None
+
+
+def test_connection_dialog_cancel_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_connection_dialog_tk(monkeypatch, text_value="csm1:abc", click="Cancel")
+    assert tn._run_connection_dialog() is None
+
+
+def test_connection_dialog_runs_tk_on_a_dedicated_thread(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(tn.threading, "Thread", _REAL_THREAD)
+    seen: list[int] = []
+    root = _stub_connection_dialog_tk(monkeypatch, text_value="csm1:abc", click="OK")
+
+    def _fake_tk() -> MagicMock:
+        seen.append(threading.get_ident())
+        return root
+
+    monkeypatch.setattr(tn.tk, "Tk", _fake_tk)
+    assert tn._run_connection_dialog() == "csm1:abc"
+    assert seen and seen[0] != threading.get_ident()

@@ -28,7 +28,7 @@ import threading
 import time
 import webbrowser
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 import psutil
 import pystray
@@ -274,6 +274,40 @@ class _ToastWorker:
             print(f"Toast notification failed ({error})", file=sys.stderr)
 
 
+_T = TypeVar("_T")
+
+
+def _run_in_dedicated_thread(body: Callable[[], _T]) -> _T:
+    """Run ``body`` on a brand-new, single-purpose thread and block the
+    calling thread until it finishes, returning its result (or re-raising
+    whatever it raised).
+
+    Both `_run_label_dialog()` and `_run_connection_dialog()` are invoked
+    from pystray's own menu-callback thread, which on Windows already drives
+    its own native message pump for the tray icon. Creating a `tk.Tk()`
+    window on that same thread is a documented source of dialogs that
+    render but never respond to clicks (exactly the "OK does nothing"
+    symptom this fixes) -- Tk's event loop and pystray's Win32 message pump
+    both expect to own their thread. Running the Tk work on its own
+    disposable thread, and blocking/joining from the caller, keeps those
+    functions' existing synchronous call signature and return values
+    unchanged; only the thread the Tk code actually executes on changes.
+    """
+    result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
+
+    def _runner() -> None:
+        try:
+            result.put((True, body()))
+        except Exception as error:  # noqa: BLE001 - re-raised on the caller's thread below
+            result.put((False, error))
+
+    threading.Thread(target=_runner, name="pymonitor-tray-dialog", daemon=True).start()
+    ok, value = result.get()
+    if not ok:
+        raise value
+    return value
+
+
 def _show_error(title: str, message: str) -> None:
     """Port of tray.ps1's `[System.Windows.Forms.MessageBox]::Show(...)`
     failure dialogs (connection request / connect-result failures)."""
@@ -295,18 +329,27 @@ def _run_label_dialog() -> str:
     `tkinter.simpledialog.askstring` returns `None` on Cancel, so that is
     coerced to "" here to preserve the original's "Cancel always proceeds"
     quirk rather than introducing a new ability to abort.
+
+    The actual Tk dialog runs on a dedicated one-shot thread via
+    `_run_in_dedicated_thread()` -- see that function's docstring for why
+    (pystray's icon-callback thread already owns a native Win32 message
+    pump, which conflicts with Tk's own event loop on the same thread).
     """
-    root = tk.Tk()
-    root.withdraw()
-    try:
-        value = simpledialog.askstring(
-            "Generate connection request",
-            "Optional label for this sub machine (leave blank for a default name):",
-            parent=root,
-        )
-    finally:
-        root.destroy()
-    return value or ""
+
+    def _body() -> str:
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            value = simpledialog.askstring(
+                "Generate connection request",
+                "Optional label for this sub machine (leave blank for a default name):",
+                parent=root,
+            )
+        finally:
+            root.destroy()
+        return value or ""
+
+    return _run_in_dedicated_thread(_body)
 
 
 def _run_connection_dialog() -> str | None:
@@ -317,38 +360,45 @@ def _run_connection_dialog() -> str | None:
     strings can be up to 32KB long. Unlike the label dialog above, Cancel
     (or an empty/whitespace-only paste) here genuinely aborts -- returns
     `None` -- matching the original's `if ($null -ne $value)` guard.
+
+    The actual Tk dialog runs on a dedicated one-shot thread via
+    `_run_in_dedicated_thread()` -- see that function's docstring for why.
     """
-    root = tk.Tk()
-    root.withdraw()
-    result: dict[str, str | None] = {"value": None}
-    try:
-        dialog = tk.Toplevel(root)
-        dialog.title("Connect to host")
-        dialog.resizable(False, False)
-        tk.Label(dialog, text="Paste the connection string copied from the host machine:").pack(
-            padx=12, pady=(12, 4), anchor="w"
-        )
-        text = tk.Text(dialog, width=58, height=8, wrap="word")
-        text.pack(padx=12, pady=4)
-        buttons = tk.Frame(dialog)
-        buttons.pack(padx=12, pady=(4, 12), anchor="e")
 
-        def _ok() -> None:
-            result["value"] = text.get("1.0", "end").strip() or None
-            dialog.destroy()
+    def _body() -> str | None:
+        root = tk.Tk()
+        root.withdraw()
+        result: dict[str, str | None] = {"value": None}
+        try:
+            dialog = tk.Toplevel(root)
+            dialog.title("Connect to host")
+            dialog.resizable(False, False)
+            tk.Label(dialog, text="Paste the connection string copied from the host machine:").pack(
+                padx=12, pady=(12, 4), anchor="w"
+            )
+            text = tk.Text(dialog, width=58, height=8, wrap="word")
+            text.pack(padx=12, pady=4)
+            buttons = tk.Frame(dialog)
+            buttons.pack(padx=12, pady=(4, 12), anchor="e")
 
-        def _cancel() -> None:
-            dialog.destroy()
+            def _ok() -> None:
+                result["value"] = text.get("1.0", "end").strip() or None
+                dialog.destroy()
 
-        tk.Button(buttons, text="OK", width=8, command=_ok).pack(side="left", padx=4)
-        tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
-        dialog.protocol("WM_DELETE_WINDOW", _cancel)
-        dialog.transient(root)
-        dialog.grab_set()
-        root.wait_window(dialog)
-    finally:
-        root.destroy()
-    return result["value"]
+            def _cancel() -> None:
+                dialog.destroy()
+
+            tk.Button(buttons, text="OK", width=8, command=_ok).pack(side="left", padx=4)
+            tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
+            dialog.protocol("WM_DELETE_WINDOW", _cancel)
+            dialog.transient(root)
+            dialog.grab_set()
+            root.wait_window(dialog)
+        finally:
+            root.destroy()
+        return result["value"]
+
+    return _run_in_dedicated_thread(_body)
 
 
 def _copy_to_clipboard(value: str) -> None:
