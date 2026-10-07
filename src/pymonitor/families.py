@@ -219,8 +219,18 @@ class FamilyMonitor:
         deduped = {entry["id"]: entry for entry in entries}
         for entry in deduped.values():
             row = current.get(entry["id"])
-            if not row or not row.get("dismissKey") or row["dismissKey"] != entry["key"]:
-                result["skipped"].append({"id": entry["id"], "reason": "No longer the same safely finished family"})
+            # entry["key"] is still required and format-validated above, but is no
+            # longer compared against the row's current dismissKey. Requiring an
+            # exact match made "Clear retained" unreliable: any poll tick landing
+            # between the dashboard's last render and the user's click -- even one
+            # that represents no meaningful change -- changes the hash and silently
+            # dropped the entry into "skipped" with no obvious way to retry. The
+            # only protection that matters is still enforced: a family must
+            # currently be in a dismissable state (finished/unknown -> dismissKey
+            # truthy); working/waiting/error rows have no dismissKey and stay
+            # un-dismissable.
+            if not row or not row.get("dismissKey"):
+                result["skipped"].append({"id": entry["id"], "reason": "No longer a dismissable finished family"})
             else:
                 self.dismissed[entry["id"]] = row["dismissKey"]
                 result["dismissed"].append(entry["id"])

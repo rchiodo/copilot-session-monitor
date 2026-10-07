@@ -113,15 +113,40 @@ async def test_unconfirmed_family_can_be_dismissed_survives_restart_restored_by_
     assert len(restored.dismissed) == 0
 
 
-def test_unconfirmed_family_with_stale_dismiss_key_cannot_be_dismissed_replay_safety():
+def test_dismiss_key_value_is_no_longer_compared_only_current_eligibility_gates_it():
     async def _emit(*_a, **_k) -> None:
         return None
 
     monitor = FamilyMonitor("TEST", _emit, [row("stuck", "unknown")])
+    # Any syntactically valid key dismisses an eligible row now: the exact-match
+    # requirement was the source of "Clear retained sometimes does nothing" (any
+    # poll tick between the dashboard's last render and the click changed the
+    # hash). Eligibility (dismissKey truthy, i.e. state is finished/unknown) is
+    # the only gate that remains.
     result = monitor.dismiss([{"id": "stuck", "key": "a" * 64}])
-    assert result["dismissed"] == []
-    assert len(result["skipped"]) == 1
-    assert len(monitor.snapshot()["sessions"]) == 1
+    assert result["dismissed"] == ["stuck"]
+    assert result["skipped"] == []
+    assert len(monitor.snapshot()["sessions"]) == 0
+
+
+def test_dismiss_survives_a_dismiss_key_changing_between_render_and_click_clear_retained_race():
+    async def _emit(*_a, **_k) -> None:
+        return None
+
+    monitor = FamilyMonitor("TEST", _emit, [row("done", "finished")])
+    stale_key = entries(monitor)[0]["key"]
+    # Simulate a poll tick landing between the dashboard's last render (which
+    # captured stale_key) and the user's click: an identity field the hash
+    # depends on shifts (e.g. a fresh runId from a re-observed poll), producing
+    # a different current dismissKey even though the family is still eligible
+    # (state remains "finished"). Dismiss must still succeed using the stale key.
+    monitor.engine.rows["done"] = {**monitor.engine.rows["done"], "runId": "new-run-id"}
+    fresh_key = group_families(list(monitor.rows.values()))[0]["dismissKey"]
+    assert fresh_key != stale_key
+    result = monitor.dismiss([{"id": "done", "key": stale_key}])
+    assert result["dismissed"] == ["done"]
+    assert result["skipped"] == []
+    assert len(monitor.snapshot()["sessions"]) == 0
 
 
 def test_bulk_clear_finished_never_dismisses_unconfirmed_only_per_row_dismiss_does():
@@ -186,7 +211,13 @@ async def test_new_work_restores_dismissed_family_and_notifies_once_on_new_compl
     event(events, "assistant.turn_end", "end", {"turnId": "0"})
     done = await monitor.update([sample(id_, events, parent, busy=False)], {"now": 2000})
     assert done["sessions"][0]["state"] == "finished"
-    assert len(monitor.dismiss(old)["skipped"]) == 1
+    # NOTE: dismiss() no longer compares the submitted key's value, only current
+    # eligibility -- so this stale pre-new-completion key now succeeds (it did
+    # not before). The alert-emission assertion below is unaffected: the
+    # "finished" alert already fired from the `done =` update above (armed via
+    # the earlier "working" transition), and this dismiss() call does not emit
+    # alerts itself.
+    assert monitor.dismiss(old)["dismissed"] == ["p"]
     await monitor.update([sample(id_, events, parent, busy=False)], {"now": 3000})
     assert len([alert for alert in alerts if alert["kind"] == "finished"]) == 1
 
