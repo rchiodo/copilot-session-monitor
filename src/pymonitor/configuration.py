@@ -75,6 +75,7 @@ __all__ = [
     "save_config",
     "validate_collector",
     "load_collector",
+    "detect_lan_address",
     "initialize",
     "pair",
     "ensure_local_reporter",
@@ -311,6 +312,73 @@ def _local_interface_addresses() -> list[str]:
             if entry.address:
                 addresses.append(entry.address.split("%", 1)[0])
     return addresses
+
+
+def _default_route_probe_address() -> str | None:
+    """Best-effort local address for the interface the OS would use to
+    reach the network/gateway.
+
+    Uses the standard connectionless-UDP-socket trick: ``connect()`` on a
+    UDP socket never sends a packet, it only asks the OS routing table to
+    pick an outbound interface, whose address ``getsockname()`` then
+    reports. This sidesteps unreliable adapter *names* (virtual Hyper-V/WSL
+    switches commonly sort before or shadow the real Wi-Fi/Ethernet adapter
+    in enumeration order) and needs no administrative privileges. Returns
+    ``None`` if there is no route at all (fully offline).
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("8.8.8.8", 80))
+        return probe.getsockname()[0]
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def _candidate_lan_addresses() -> list[str]:
+    """Private IPv4 addresses usable for cross-machine binding.
+
+    ``private_address()`` also accepts loopback (127.x) and link-local
+    (169.254.x) ranges -- useful for validating an already-chosen
+    ``bindAddress``, but neither is reachable from another machine, so both
+    are excluded here.
+    """
+    candidates: list[str] = []
+    for address in _local_interface_addresses():
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError:
+            continue
+        if isinstance(ip, ipaddress.IPv6Address):
+            continue
+        first_octet, second_octet = ip.packed[0], ip.packed[1]
+        if first_octet == 127 or (first_octet == 169 and second_octet == 254):
+            continue
+        if private_address(address):
+            candidates.append(address)
+    return candidates
+
+
+def detect_lan_address() -> str:
+    """Pick this machine's LAN-reachable private IPv4 address.
+
+    Prefers whichever address the OS would actually use to reach the
+    network (the default-route probe), falling back to the first private,
+    non-loopback, non-link-local address found via interface enumeration.
+    Raises ``RuntimeError`` if none exists (e.g. offline with only a
+    loopback/link-local interface, or airplane mode).
+    """
+    candidates = _candidate_lan_addresses()
+    if not candidates:
+        raise RuntimeError(
+            "No private LAN IPv4 address found on any network interface; "
+            "connect to a network before setting up multi-machine access."
+        )
+    probed = _default_route_probe_address()
+    if probed and probed in candidates:
+        return probed
+    return candidates[0]
 
 
 async def initialize(

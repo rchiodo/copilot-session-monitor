@@ -157,6 +157,53 @@ def test_validate_collector_rejects_more_than_one_legacy_row() -> None:
 
 
 # --------------------------------------------------------------------------
+# detect_lan_address()
+# --------------------------------------------------------------------------
+
+
+def test_detect_lan_address_prefers_default_route_probe(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cfg, "_local_interface_addresses", lambda: ["127.0.0.1", "169.254.1.2", LOCAL_IP, "10.0.0.9"]
+    )
+    monkeypatch.setattr(cfg, "_default_route_probe_address", lambda: "10.0.0.9")
+    assert cfg.detect_lan_address() == "10.0.0.9"
+
+
+def test_detect_lan_address_falls_back_when_probe_address_not_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Probe returns an address psutil doesn't see as a local interface (or a
+    # loopback/link-local one) -- fall back to the first real candidate
+    # instead of trusting it blindly.
+    monkeypatch.setattr(cfg, "_local_interface_addresses", lambda: ["127.0.0.1", LOCAL_IP])
+    monkeypatch.setattr(cfg, "_default_route_probe_address", lambda: "203.0.113.5")
+    assert cfg.detect_lan_address() == LOCAL_IP
+
+
+def test_detect_lan_address_falls_back_when_probe_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cfg, "_local_interface_addresses", lambda: ["127.0.0.1", LOCAL_IP])
+    monkeypatch.setattr(cfg, "_default_route_probe_address", lambda: None)
+    assert cfg.detect_lan_address() == LOCAL_IP
+
+
+def test_detect_lan_address_excludes_loopback_and_link_local(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cfg, "_local_interface_addresses", lambda: ["127.0.0.1", "169.254.3.4", LOCAL_IP]
+    )
+    monkeypatch.setattr(cfg, "_default_route_probe_address", lambda: None)
+    assert cfg.detect_lan_address() == LOCAL_IP
+
+
+def test_detect_lan_address_raises_when_no_private_address_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cfg, "_local_interface_addresses", lambda: ["127.0.0.1", "169.254.3.4"])
+    monkeypatch.setattr(cfg, "_default_route_probe_address", lambda: None)
+    with pytest.raises(RuntimeError, match="No private LAN IPv4 address"):
+        cfg.detect_lan_address()
+
+
+# --------------------------------------------------------------------------
 # initialize()
 # --------------------------------------------------------------------------
 

@@ -19,6 +19,7 @@ from pymonitor.launcher import (
     LauncherError,
     check_python_version,
     data_dir_for,
+    ensure_lan_bind,
     get_live_role,
     load_runtime,
     probe_status,
@@ -473,3 +474,91 @@ def test_stop_role_raises_if_the_runtime_file_never_disappears(tmp_path: Path) -
             sleep=lambda _s: None,
             poll_attempts=3,
         )
+
+
+# --- ensure_lan_bind -------------------------------------------------------
+
+
+def test_ensure_lan_bind_stops_a_running_collector_before_reconfiguring(tmp_path: Path) -> None:
+    runtime = _write_runtime(tmp_path, COLLECTOR_ROLE)
+    posted = []
+
+    def _get(url: str, timeout: float) -> dict[str, Any]:
+        return {"instanceId": runtime["instanceId"]}
+
+    def _post(url: str, headers: dict[str, str], timeout: float) -> None:
+        posted.append(url)
+        (tmp_path / COLLECTOR_ROLE.runtime_file).unlink()
+
+    commands: list[list[str]] = []
+
+    address = ensure_lan_bind(
+        tmp_path,
+        port=43188,
+        data_dir=tmp_path,
+        http_get_json=_get,
+        http_post=_post,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "192.168.1.42",
+        run_configuration_command=commands.append,
+    )
+
+    assert address == "192.168.1.42"
+    assert posted, "the already-running collector should have been stopped first"
+    assert commands == [["initialize", "192.168.1.42", "43188", "replace"]]
+
+
+def test_ensure_lan_bind_tolerates_no_collector_currently_running(tmp_path: Path) -> None:
+    # stop_role is a no-op (returns False) when nothing is running -- this
+    # must not stop ensure_lan_bind from proceeding to detect + initialize.
+    commands: list[list[str]] = []
+
+    address = ensure_lan_bind(
+        tmp_path,
+        data_dir=tmp_path,
+        http_get_json=lambda *a: {},
+        http_post=lambda *a: None,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "10.0.0.7",
+        run_configuration_command=commands.append,
+    )
+
+    assert address == "10.0.0.7"
+    assert commands == [["initialize", "10.0.0.7", "43188", "replace"]]
+
+
+def test_ensure_lan_bind_passes_the_requested_port_to_the_configuration_command(tmp_path: Path) -> None:
+    commands: list[list[str]] = []
+
+    ensure_lan_bind(
+        tmp_path,
+        port=9000,
+        data_dir=tmp_path,
+        http_get_json=lambda *a: {},
+        http_post=lambda *a: None,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "10.0.0.9",
+        run_configuration_command=commands.append,
+    )
+
+    assert commands == [["initialize", "10.0.0.9", "9000", "replace"]]
+
+
+def test_ensure_lan_bind_defaults_data_dir_to_data_dir_for_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # No data_dir override supplied: ensure_lan_bind should derive it the
+    # same way start_role/stop_role do, via data_dir_for(root), rather than
+    # requiring every caller to pass it explicitly.
+    monkeypatch.delenv("MONITOR_DATA_DIR", raising=False)
+    commands: list[list[str]] = []
+
+    address = ensure_lan_bind(
+        tmp_path,
+        http_get_json=lambda *a: {},
+        http_post=lambda *a: None,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "10.0.0.11",
+        run_configuration_command=commands.append,
+    )
+
+    assert address == "10.0.0.11"
+    assert commands == [["initialize", "10.0.0.11", "43188", "replace"]]

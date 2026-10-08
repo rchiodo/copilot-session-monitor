@@ -46,6 +46,7 @@ __all__ = [
     "get_live_role",
     "start_role",
     "stop_role",
+    "ensure_lan_bind",
 ]
 
 # Mirrors Stop-Role.ps1's URL validation: refuse to trust/act on a runtime
@@ -382,3 +383,63 @@ def stop_role(
         else:
             raise LauncherError(f"{role.name} did not finish stopping.")
     return True
+
+
+ConfigurationCommandFn = Callable[[list[str]], None]
+DetectLanAddressFn = Callable[[], str]
+
+
+def _default_detect_lan_address() -> str:
+    from .configuration import detect_lan_address
+
+    return detect_lan_address()
+
+
+def _default_run_configuration_command(command: list[str]) -> None:
+    import asyncio
+
+    from .configuration import configuration_command
+
+    asyncio.run(configuration_command(command))
+
+
+def ensure_lan_bind(
+    root: Path,
+    *,
+    port: int = 43188,
+    data_dir: Path | None = None,
+    http_get_json: HttpGetJson = _default_http_get_json,
+    http_post: HttpPost = _default_http_post,
+    sleep: Callable[[float], None] = time.sleep,
+    detect_lan_address: DetectLanAddressFn = _default_detect_lan_address,
+    run_configuration_command: ConfigurationCommandFn = _default_run_configuration_command,
+) -> str:
+    """Collapse the manual "stop, detect, reconfigure" multi-machine setup
+    dance (``stop-host.py`` then ``detect-lan-ip.py``/``init-host.py
+    --reconfigure``) into the one step `start_role` needs before spawning a
+    collector that should be LAN-reachable instead of loopback-only.
+
+    Stops any live collector first -- `initialize()` refuses to run while
+    one owns the data directory -- then detects this machine's LAN-facing
+    address (`configuration.detect_lan_address`) and applies it via the
+    same ``initialize ... replace`` path ``init-host.py --reconfigure`` /
+    ``detect-lan-ip.py`` use. A no-op `stop_role` (collector wasn't running)
+    is not an error. Returns the address that was applied.
+
+    This is only ever invoked explicitly (e.g. a ``--lan`` flag), never
+    unconditionally from `start_role`: a fresh collector binding loopback-
+    only by default -- no LAN interface opened -- is a deliberate privacy
+    posture that must stay opt-in.
+    """
+    data_dir = data_dir if data_dir is not None else data_dir_for(root)
+    stop_role(
+        root,
+        COLLECTOR_ROLE,
+        data_dir=data_dir,
+        http_get_json=http_get_json,
+        http_post=http_post,
+        sleep=sleep,
+    )
+    address = detect_lan_address()
+    run_configuration_command(["initialize", address, str(port), "replace"])
+    return address

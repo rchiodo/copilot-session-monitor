@@ -67,6 +67,10 @@ uv run init-host.py 192.168.1.20 43188 --reconfigure
 uv run start-tray.py --host
 ```
 
+Not sure which IP to use? `uv run detect-lan-ip.py` picks the address this PC would actually use to reach the network (the same address the OS routing table would pick for an outbound connection) and applies it directly — equivalent to the `init-host.py ... --reconfigure` line above, without having to read through `ipconfig`/`Get-NetIPAddress` output and guess past virtual adapters (Hyper-V switches, WSL). Add `--dry-run` to print the detected address without changing the collector config, or `--port` to use a non-default ingestion port. If the machine has more than one real network path (e.g. Wi-Fi and a wired connection both up), verify the detected address is the one reachable from your other PCs before pairing.
+
+**Or skip the three commands above entirely:** `uv run start-host.py --lan` (or `uv run start-tray.py --host --lan`) does the stop/detect/reconfigure dance automatically, then starts the collector — equivalent to `stop-host.py` + `detect-lan-ip.py` + `start-tray.py --host` in one step. Pass `--lan-port` to pick a non-default ingestion port. `--lan` only applies to the collector/host role; it's rejected on `start-tray.py` without `--host`. It's opt-in on purpose — the default stays loopback-only (127.0.0.1) unless you explicitly ask for a LAN bind.
+
 This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
 
 Right-click the collector's tray icon and choose **"Generate connection request for a sub machine..."**. Optionally type a label to identify the source PC (e.g. "Development laptop"), then OK. A connection string — prefixed `csm1:` — is copied to the clipboard and a confirmation toast appears. The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
@@ -94,6 +98,8 @@ No remote production connectivity is assumed just because local tests pass. Afte
 | `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`, with a tray icon offering "Generate connection request...". |
 | `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`, with a tray icon offering "Connect to host...". |
 | `uv run init-host.py` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
+| `uv run detect-lan-ip.py` | Detect this PC's LAN-reachable IP and apply it via the same path as `init-host.py --reconfigure`. Add `--dry-run` to only print the detected address. |
+| `uv run start-host.py --lan` / `uv run start-tray.py --host --lan` | Automate stop + detect + reconfigure + start in one command. Add `--lan-port` for a non-default ingestion port. `--lan` is rejected without `--host` on `start-tray.py`. |
 | `uv run start-host.py --no-browser` | Start only the collector; no local Copilot installation is required. |
 | `uv run stop-host.py` | Stop only the collector; watchers will report unavailable and retry. |
 | `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
