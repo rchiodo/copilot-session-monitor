@@ -508,6 +508,23 @@ async def list_remote_reporters() -> list[dict[str, str]]:
     return [{"id": row["id"], "label": row["label"]} for row in config["reporters"] if not row["legacy"]]
 
 
+def list_remote_reporters_sync() -> list[dict[str, str]]:
+    """Synchronous twin of `list_remote_reporters()`.
+
+    The native tray's "Recopy connection string for..." submenu is rebuilt
+    by pystray on its own dedicated callback thread and needs the reporter
+    list back immediately (see `tray_native.py`'s `_recopy_menu_items()`).
+    Reading `collector.json` is a small, local, synchronous file read that
+    doesn't actually need the collector's asyncio event loop at all, so
+    this avoids bridging onto that loop with a blocking
+    `.result(timeout=...)` -- which was observed to reliably time out
+    (leaving the submenu stuck on a placeholder) whenever the loop was busy,
+    e.g. servicing a watcher's TLS connection attempts.
+    """
+    config = validate_collector(json.loads((data_dir / "collector.json").read_text(encoding="utf-8")))
+    return [{"id": row["id"], "label": row["label"]} for row in config["reporters"] if not row["legacy"]]
+
+
 async def connection_string_for_reporter(reporter_id: str) -> str:
     """Re-encode an already-paired reporter's connection string.
 

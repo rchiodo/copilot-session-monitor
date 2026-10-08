@@ -40,6 +40,7 @@ from .configuration import (
     ensure_local_reporter,
     initialize,
     list_remote_reporters,
+    list_remote_reporters_sync,
     load_collector,
     migrate_legacy,
     pair_connection_string,
@@ -590,6 +591,12 @@ async def remote_reporters() -> list[dict[str, str]]:
     same way `pair_connection` already does, rather than importing
     `configuration.py` directly."""
     return await list_remote_reporters()
+
+
+def remote_reporters_sync() -> list[dict[str, str]]:
+    """Synchronous twin of `remote_reporters()` -- see
+    `list_remote_reporters_sync()`'s docstring for why this exists."""
+    return list_remote_reporters_sync()
 
 
 async def recopy_connection(reporter_id: str) -> str:

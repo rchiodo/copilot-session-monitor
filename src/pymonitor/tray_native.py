@@ -576,16 +576,20 @@ class CollectorNativeTray:
         pystray's `Menu(callable)` support re-invokes this directly on its
         own internal callback thread every time the native menu is
         (re)built, and needs the result back immediately to populate the
-        submenu -- so, unlike the other handlers below, this bridges onto
-        the asyncio loop with a blocking `.result()` rather than a
-        fire-and-forget `run_coroutine_threadsafe(...)` call.
+        submenu -- so this calls `remote_reporters_sync()` directly instead
+        of bridging onto the asyncio loop. That bridge (a blocking
+        `.result(timeout=2)` on a future scheduled via
+        `run_coroutine_threadsafe`) was observed to reliably raise
+        `TimeoutError` whenever the loop was busy (e.g. servicing a
+        watcher's TLS connection attempts), leaving the submenu stuck on
+        the "(unable to list paired machines)" placeholder below. Listing
+        paired machines is just a local `collector.json` read, so it
+        doesn't need the event loop at all.
         """
-        assert self._loop is not None
-        from .server import remote_reporters
+        from .server import remote_reporters_sync
 
         try:
-            future = asyncio.run_coroutine_threadsafe(remote_reporters(), self._loop)
-            reporters = future.result(timeout=2)
+            reporters = remote_reporters_sync()
         except Exception as error:  # noqa: BLE001 - menu building must never raise into pystray
             print(f"Could not list paired machines ({error})", file=sys.stderr)
             return (pystray.MenuItem("(unable to list paired machines)", None, enabled=False),)
