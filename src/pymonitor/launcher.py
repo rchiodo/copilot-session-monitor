@@ -433,12 +433,29 @@ def ensure_lan_bind(
     ``detect-lan-ip.py`` use. A no-op `stop_role` (collector wasn't running)
     is not an error. Returns the address that was applied.
 
+    If the collector is already configured for this exact LAN address and
+    port, the stop+reconfigure round trip is skipped entirely and this is a
+    true no-op: ``initialize(..., reconfigure=True)`` unconditionally
+    rotates the TLS certificate (see `configuration.initialize`), which
+    would otherwise silently invalidate every already-paired remote
+    watcher's pinned certificate (see `protocol.request`'s pin check) each
+    time ``--lan`` is re-run, even when nothing actually changed.
+
     This is only ever invoked explicitly (e.g. a ``--lan`` flag), never
     unconditionally from `start_role`: a fresh collector binding loopback-
     only by default -- no LAN interface opened -- is a deliberate privacy
     posture that must stay opt-in.
     """
     data_dir = data_dir if data_dir is not None else data_dir_for(root)
+    address = detect_lan_address()
+
+    try:
+        existing = json.loads((data_dir / "collector.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        existing = None
+    if existing is not None and existing.get("bindAddress") == address and existing.get("port") == port:
+        return address
+
     stop_role(
         root,
         COLLECTOR_ROLE,
@@ -447,6 +464,5 @@ def ensure_lan_bind(
         http_post=http_post,
         sleep=sleep,
     )
-    address = detect_lan_address()
     run_configuration_command(["initialize", address, str(port), "replace"])
     return address

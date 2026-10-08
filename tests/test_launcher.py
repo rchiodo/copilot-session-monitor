@@ -544,6 +544,67 @@ def test_ensure_lan_bind_passes_the_requested_port_to_the_configuration_command(
     assert commands == [["initialize", "10.0.0.9", "9000", "replace"]]
 
 
+def test_ensure_lan_bind_is_a_no_op_when_already_bound_to_the_same_address_and_port(
+    tmp_path: Path,
+) -> None:
+    # Regression test: re-running `--lan` against an already-correct bind
+    # address/port must not stop the collector or call "initialize ...
+    # replace" -- that would unconditionally rotate the TLS certificate
+    # (configuration.initialize) and silently break every already-paired
+    # remote watcher's certificate pin for no reason.
+    (tmp_path / "collector.json").write_text(
+        '{"bindAddress": "192.168.1.42", "port": 43188}', encoding="utf-8"
+    )
+    calls: list[str] = []
+
+    def _get(url: str, timeout: float) -> dict[str, Any]:
+        calls.append("get")
+        return {}
+
+    def _post(url: str, headers: dict[str, str], timeout: float) -> None:
+        calls.append("post")
+
+    commands: list[list[str]] = []
+
+    address = ensure_lan_bind(
+        tmp_path,
+        port=43188,
+        data_dir=tmp_path,
+        http_get_json=_get,
+        http_post=_post,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "192.168.1.42",
+        run_configuration_command=commands.append,
+    )
+
+    assert address == "192.168.1.42"
+    assert calls == [], "stop_role must not be consulted when nothing is changing"
+    assert commands == [], "initialize/reconfigure must not run when nothing is changing"
+
+
+def test_ensure_lan_bind_reconfigures_when_address_differs_from_existing_config(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "collector.json").write_text(
+        '{"bindAddress": "10.0.0.1", "port": 43188}', encoding="utf-8"
+    )
+    commands: list[list[str]] = []
+
+    address = ensure_lan_bind(
+        tmp_path,
+        port=43188,
+        data_dir=tmp_path,
+        http_get_json=lambda *a: {},
+        http_post=lambda *a: None,
+        sleep=lambda _seconds: None,
+        detect_lan_address=lambda: "192.168.1.42",
+        run_configuration_command=commands.append,
+    )
+
+    assert address == "192.168.1.42"
+    assert commands == [["initialize", "192.168.1.42", "43188", "replace"]]
+
+
 def test_ensure_lan_bind_defaults_data_dir_to_data_dir_for_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # No data_dir override supplied: ensure_lan_bind should derive it the
     # same way start_role/stop_role do, via data_dir_for(root), rather than
