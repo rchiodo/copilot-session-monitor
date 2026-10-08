@@ -86,6 +86,43 @@ async def test_release_does_not_remove_a_lock_written_by_a_newer_acquisition(tmp
     assert json.loads(lock.read_text(encoding="utf-8")) == second_owner_content
 
 
+async def test_mutex_blocks_a_concurrent_acquisition_from_another_thread(tmp_path: Path) -> None:
+    """Regression test for the race this change closes.
+
+    Windows mutexes are reentrant for the *owning thread*, so two
+    `acquire_role()` calls from the same (async, single-threaded) test
+    would both succeed at the mutex layer regardless of ordering -- that
+    layer only matters across genuinely different owners. This test stands
+    a different OS thread in for a different process: it must be blocked by
+    the mutex alone, independent of the lock file (which is never even
+    written by the blocked side).
+    """
+    if lc.win32event is None:
+        pytest.skip("named-mutex gate is Windows-only")
+
+    import threading
+
+    holder_ready = threading.Event()
+    release_holder = threading.Event()
+    holder_release: list[object] = []
+
+    def hold() -> None:
+        holder_release.append(lc._acquire_mutex(tmp_path, "collector"))
+        holder_ready.set()
+        release_holder.wait(timeout=5)
+        holder_release[0]()
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    try:
+        assert holder_ready.wait(timeout=5), "holder thread never acquired the mutex"
+        with pytest.raises(RuntimeError, match="collector already owns this directory"):
+            lc._acquire_mutex(tmp_path, "collector")
+    finally:
+        release_holder.set()
+        thread.join(timeout=5)
+
+
 async def test_acquire_role_after_release_succeeds(tmp_path: Path) -> None:
     release = await lc.acquire_role(tmp_path, "collector")
     await release()
