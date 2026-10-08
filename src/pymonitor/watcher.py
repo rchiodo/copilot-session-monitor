@@ -128,8 +128,6 @@ class Watcher:
                 await self.reporter.disconnect()
             except Exception as error:  # noqa: BLE001 - mirrors JS best-effort disconnect logging
                 print(f"Collector disconnect not acknowledged ({getattr(error, 'status', None) or type(error).__name__})")
-        if self.bridge:
-            await self.bridge.on_stop()
         if self._runner:
             await self._runner.cleanup()
         runtime_file = data_dir / "watcher-runtime.json"
@@ -137,6 +135,12 @@ class Watcher:
             runtime_file.unlink()
         if self._release:
             await self._release()
+        # `bridge.on_stop()` runs last, after state is released: it's what
+        # signals `cli.py`'s `_host()` to actually exit the process (see
+        # `WatcherNativeTray.on_stop`). See `CollectorServer.stop()` for the
+        # matching fix on the collector/host side.
+        if self.bridge:
+            await self.bridge.on_stop()
 
     # -- reporting loop --------------------------------------------------
 

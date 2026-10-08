@@ -532,7 +532,16 @@ class CollectorNativeTray:
         await self._generate_connection(label or "")
 
     async def on_stop(self) -> None:
+        # `CollectorServer.stop()` calls this as the last step of its own
+        # shutdown (after all cleanup has finished), whether triggered by the
+        # tray's "Stop collector" menu item or the HTTP `/api/stop` endpoint
+        # (used by `stop-host.py`). Setting `_stop_event` here is what
+        # unblocks `_run_until_signalled()` in `cli.py`'s `_host()` so the
+        # process actually exits -- previously only the tray-click path did
+        # this (via its own `add_done_callback`), so stopping via HTTP left
+        # the process hung forever after `stop-host.py` reported success.
         self._shutdown()
+        self._stop_event.set()
 
     def _shutdown(self) -> None:
         if self._stopped:
@@ -636,7 +645,10 @@ class WatcherNativeTray:
         return None
 
     async def on_stop(self) -> None:
+        # See `CollectorNativeTray.on_stop` -- same fix for the watcher/client
+        # role's "Stop watcher" menu item vs. the `/stop` HTTP endpoint.
         self._shutdown()
+        self._stop_event.set()
 
     def _shutdown(self) -> None:
         if self._stopped:

@@ -328,13 +328,19 @@ class CollectorServer:
             await runner.cleanup()
         if self._dashboard_runner:
             await self._dashboard_runner.cleanup()
-        if self.bridge:
-            await self.bridge.on_stop()
         import asyncio
 
         while self.local_polling:
             await asyncio.sleep(0.05)
         await self.actions.run(self._finish_stop)
+        # `bridge.on_stop()` runs last, after state is saved and the runtime
+        # file/role lock are released: it's what signals `cli.py`'s
+        # `_host()` to actually exit the process (see
+        # `CollectorNativeTray.on_stop`). Calling it earlier would let the
+        # process tear down its event loop before `_finish_stop` finished
+        # writing/releasing that state.
+        if self.bridge:
+            await self.bridge.on_stop()
 
     async def _finish_stop(self) -> None:
         if self.local_lease:
@@ -362,7 +368,11 @@ class CollectorServer:
         app.router.add_post("/api/dismiss", self._handle_dismiss)
         for route, (_, _) in _STATIC_ASSETS.items():
             app.router.add_get(route, self._handle_static)
-        runner = web.AppRunner(app)
+        # SSE clients (`/api/stream`) hold their connection open forever (see
+        # `_handle_stream`), so aiohttp's default 60s `shutdown_timeout` would make
+        # `cleanup()` wait up to a minute for an open dashboard tab to disconnect
+        # during stop. A short bound keeps shutdown snappy regardless.
+        runner = web.AppRunner(app, shutdown_timeout=2.0)
         await runner.setup()
         site = web.TCPSite(runner, "127.0.0.1", self.port)
         await site.start()
@@ -491,7 +501,7 @@ class CollectorServer:
         ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_context.load_cert_chain(str(data_dir / "collector-cert.pem"), str(data_dir / "collector-key.pem"))
         for address in dict.fromkeys(["127.0.0.1", self.config["bindAddress"]]):
-            runner = web.AppRunner(app)
+            runner = web.AppRunner(app, shutdown_timeout=2.0)
             await runner.setup()
             site = web.TCPSite(runner, address, self.config["port"], ssl_context=ssl_context)
             await site.start()
