@@ -30,6 +30,7 @@ See docs/porting-notes.md for the full Phase 2 decision record.
 """
 from __future__ import annotations
 
+import asyncio
 import datetime
 import ipaddress
 import json
@@ -324,7 +325,22 @@ async def initialize(
         return validated
     if await optional_config("runtime.json"):
         raise RuntimeError("Stop the collector before initializing or changing its listener")
-    addresses = _local_interface_addresses()
+    try:
+        # Network-interface enumeration (psutil -> OS adapter APIs) is a
+        # synchronous call with no built-in timeout. A VPN/virtual adapter
+        # stuck in a transitional state can block it indefinitely, which
+        # would otherwise hang this whole (single-threaded) process with no
+        # port ever bound and no error -- a silent zombie. Run it off the
+        # event loop thread and bound it so a stuck adapter fails loudly.
+        addresses = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(None, _local_interface_addresses),
+            timeout=10,
+        )
+    except TimeoutError as error:
+        raise RuntimeError(
+            "Timed out enumerating local network interfaces; a VPN or virtual "
+            "adapter may be stuck. Check your network adapters and try again."
+        ) from error
     if not private_address(bind_address) or bind_address not in addresses:
         raise RuntimeError("Select an assigned local/private IP (never an all-interface address)")
     config = validate_collector({
