@@ -35,9 +35,11 @@ from aiohttp import web
 from .actions import DismissError, MonitorActions, read_dismiss_entries
 from .collector import Collector
 from .configuration import (
+    connection_string_for_reporter,
     data_dir,
     ensure_local_reporter,
     initialize,
+    list_remote_reporters,
     load_collector,
     migrate_legacy,
     pair_connection_string,
@@ -581,3 +583,17 @@ async def pair_connection(label: str | None) -> str:
 
     text = (label or "").strip() or f"Sub machine {datetime.datetime.now(datetime.timezone.utc).isoformat()}"
     return await pair_connection_string(text)
+
+
+async def remote_reporters() -> list[dict[str, str]]:
+    """Thin wrapper so `tray_native.py` can reach `configuration.py` the
+    same way `pair_connection` already does, rather than importing
+    `configuration.py` directly."""
+    return await list_remote_reporters()
+
+
+async def recopy_connection(reporter_id: str) -> str:
+    """Thin wrapper around `connection_string_for_reporter` -- see
+    `pair_connection`'s docstring for why `tray_native.py` goes through
+    `server.py` instead of importing `configuration.py` directly."""
+    return await connection_string_for_reporter(reporter_id)

@@ -80,6 +80,8 @@ __all__ = [
     "pair",
     "ensure_local_reporter",
     "pair_connection_string",
+    "list_remote_reporters",
+    "connection_string_for_reporter",
     "migrate_legacy",
     "configuration_command",
 ]
@@ -490,6 +492,37 @@ async def ensure_local_reporter(config: dict[str, Any]) -> str:
 async def pair_connection_string(label: str) -> str:
     file = await pair(label)
     pairing = await read_config(Path(file).name)
+    return encode_connection_string(pairing)
+
+
+async def list_remote_reporters() -> list[dict[str, str]]:
+    """Non-legacy (remote/sub-machine) reporters currently paired to this
+    collector, for display in the tray's "recopy connection string" menu.
+
+    Excludes the local self-watcher reporter (``legacy`` is ``True``) and
+    any reporter that has since been revoked -- i.e. removed from
+    ``collector.json``'s ``reporters`` list -- even though its stale
+    ``pairing-{id}.json`` file remains on disk after a revoke.
+    """
+    config = await load_collector()
+    return [{"id": row["id"], "label": row["label"]} for row in config["reporters"] if not row["legacy"]]
+
+
+async def connection_string_for_reporter(reporter_id: str) -> str:
+    """Re-encode an already-paired reporter's connection string.
+
+    Unlike `pair()`/`pair_connection_string()`, this mints nothing new: it
+    reads the existing `pairing-{reporter_id}.json` left over from the
+    original pairing and re-runs `encode_connection_string()` on it. Tokens
+    are never rotated after pairing (see `server.py`'s auth check), so the
+    result stays valid indefinitely -- this exists purely to let the user
+    recover the connection string if they overwrite their clipboard after
+    the original "Generate connection request..." action.
+    """
+    config = await load_collector()
+    if not any(row["id"] == reporter_id and not row["legacy"] for row in config["reporters"]):
+        raise RuntimeError("That machine is no longer paired; generate a new connection request instead")
+    pairing = await read_config(f"pairing-{reporter_id}.json")
     return encode_connection_string(pairing)
 
 

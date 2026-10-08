@@ -538,6 +538,7 @@ class CollectorNativeTray:
                     pystray.MenuItem("Open observed sessions", self._on_open, default=True),
                     pystray.MenuItem("Test notification", self._on_test),
                     pystray.MenuItem("Generate connection request for a sub machine...", self._on_generate),
+                    pystray.MenuItem("Recopy connection string for...", pystray.Menu(self._recopy_menu_items)),
                     pystray.Menu.SEPARATOR,
                     pystray.MenuItem("Stop collector", self._on_stop_clicked),
                 ),
@@ -568,6 +569,42 @@ class CollectorNativeTray:
         future = asyncio.run_coroutine_threadsafe(self._server.stop(), self._loop)
         future.add_done_callback(lambda _f: self._loop.call_soon_threadsafe(self._stop_event.set))
 
+    def _recopy_menu_items(self) -> tuple[pystray.MenuItem, ...]:
+        """Builds the "Recopy connection string for..." submenu, one item
+        per machine currently paired to this collector.
+
+        pystray's `Menu(callable)` support re-invokes this directly on its
+        own internal callback thread every time the native menu is
+        (re)built, and needs the result back immediately to populate the
+        submenu -- so, unlike the other handlers below, this bridges onto
+        the asyncio loop with a blocking `.result()` rather than a
+        fire-and-forget `run_coroutine_threadsafe(...)` call.
+        """
+        assert self._loop is not None
+        from .server import remote_reporters
+
+        try:
+            future = asyncio.run_coroutine_threadsafe(remote_reporters(), self._loop)
+            reporters = future.result(timeout=2)
+        except Exception as error:  # noqa: BLE001 - menu building must never raise into pystray
+            print(f"Could not list paired machines ({error})", file=sys.stderr)
+            return (pystray.MenuItem("(unable to list paired machines)", None, enabled=False),)
+        if not reporters:
+            return (pystray.MenuItem("(no paired machines yet)", None, enabled=False),)
+        return tuple(
+            pystray.MenuItem(
+                reporter["label"],
+                lambda icon, item, reporter_id=reporter["id"], label=reporter["label"]: self._on_recopy(
+                    reporter_id, label
+                ),
+            )
+            for reporter in reporters
+        )
+
+    def _on_recopy(self, reporter_id: str, label: str) -> None:
+        assert self._loop is not None
+        asyncio.run_coroutine_threadsafe(self._recopy_connection(reporter_id, label), self._loop)
+
     async def _generate_connection(self, label: str) -> None:
         from .server import pair_connection
 
@@ -582,6 +619,28 @@ class CollectorNativeTray:
         self._toasts.show_system(
             "Connection string copied",
             'Valid for pairing one machine. Paste it on the other PC using "Connect to host...".',
+        )
+        # pystray only auto-refreshes the native menu right as this click
+        # handler is invoked (before the pairing above has happened), so
+        # the new reporter wouldn't show up in the "Recopy..." submenu
+        # until some unrelated later menu interaction without this.
+        assert self._icon is not None
+        self._icon.update_menu()
+
+    async def _recopy_connection(self, reporter_id: str, label: str) -> None:
+        from .server import recopy_connection
+
+        try:
+            value = await recopy_connection(reporter_id)
+        except Exception as error:  # noqa: BLE001 - mirrors _generate_connection's failure path
+            print(f"Recopy connection string failed ({type(error).__name__})", file=sys.stderr)
+            _show_error("Recopy failed", f"Could not recopy the connection string for {label}.")
+            return
+        _copy_to_clipboard(value)
+        assert self._toasts is not None
+        self._toasts.show_system(
+            "Connection string copied",
+            f'Paste it on {label} using "Connect to host...".',
         )
 
     # -- polling/power callbacks (run on background poll/power threads) ---

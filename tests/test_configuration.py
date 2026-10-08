@@ -484,6 +484,62 @@ async def test_pair_connection_string_round_trips_through_encode_decode() -> Non
 
 
 # --------------------------------------------------------------------------
+# list_remote_reporters() / connection_string_for_reporter()
+# --------------------------------------------------------------------------
+
+
+async def test_list_remote_reporters_excludes_legacy_and_revoked() -> None:
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    config = await cfg.load_collector()
+    await cfg.ensure_local_reporter(config)  # adds a legacy=True row
+    await cfg.pair("laptop")
+    revoked_file = await cfg.pair("old-desktop")
+    revoked_id = Path(revoked_file).name.removeprefix("pairing-").removesuffix(".json")
+    config = await cfg.load_collector()
+    config["reporters"] = [row for row in config["reporters"] if row["id"] != revoked_id]
+    await cfg.save_config("collector.json", config)
+
+    reporters = await cfg.list_remote_reporters()
+
+    assert reporters == [{"id": config["reporters"][-1]["id"], "label": "laptop"}]
+
+
+async def test_connection_string_for_reporter_round_trips_without_minting_new_token() -> None:
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    await cfg.pair("laptop")
+    config = await cfg.load_collector()
+    reporter_id = config["reporters"][0]["id"]
+
+    encoded = await cfg.connection_string_for_reporter(reporter_id)
+    decoded = proto.decode_connection_string(encoded)
+    assert decoded["label"] == "laptop"
+
+    # Re-encoding again returns the exact same (never-rotated) token.
+    encoded_again = await cfg.connection_string_for_reporter(reporter_id)
+    assert proto.decode_connection_string(encoded_again)["token"] == decoded["token"]
+    config_after = await cfg.load_collector()
+    assert len(config_after["reporters"]) == 1
+
+
+async def test_connection_string_for_reporter_rejects_revoked_reporter() -> None:
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    await cfg.pair("laptop")
+    config = await cfg.load_collector()
+    reporter_id = config["reporters"][0]["id"]
+    config["reporters"] = []
+    await cfg.save_config("collector.json", config)
+
+    with pytest.raises(RuntimeError, match="no longer paired"):
+        await cfg.connection_string_for_reporter(reporter_id)
+
+
+async def test_connection_string_for_reporter_rejects_unknown_reporter_id() -> None:
+    await cfg.initialize(LOCAL_IP, 43188, False)
+    with pytest.raises(RuntimeError, match="no longer paired"):
+        await cfg.connection_string_for_reporter("no-such-id")
+
+
+# --------------------------------------------------------------------------
 # ensure_local_reporter()
 # --------------------------------------------------------------------------
 
