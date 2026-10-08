@@ -308,13 +308,35 @@ def _run_in_dedicated_thread(body: Callable[[], _T]) -> _T:
     return value
 
 
+def _force_foreground(window: Any) -> None:
+    """Force a Tk window to render above everything else and take focus.
+
+    Every dialog below runs on a disposable thread spun up from inside a
+    pystray menu callback (see `_run_in_dedicated_thread`), so the process
+    creating the window is essentially never the current Windows foreground
+    application. Windows' focus-stealing prevention can then leave a
+    brand-new window parked behind whatever else is on screen -- it never
+    becomes visible, the user has no way to find or close it, and since
+    `_run_in_dedicated_thread` blocks pystray's own callback thread on it,
+    the *entire tray menu* then appears to hang (no new dialog, no further
+    menu clicks work -- see the regression this fixes). `-topmost`, unlike
+    `SetForegroundWindow`, doesn't require foreground permission and
+    reliably makes the window appear on top regardless of which
+    application currently has focus.
+    """
+    window.attributes("-topmost", True)
+    window.lift()
+    window.focus_force()
+
+
 def _show_error(title: str, message: str) -> None:
     """Port of tray.ps1's `[System.Windows.Forms.MessageBox]::Show(...)`
     failure dialogs (connection request / connect-result failures)."""
     root = tk.Tk()
     root.withdraw()
     try:
-        messagebox.showerror(title, message)
+        _force_foreground(root)
+        messagebox.showerror(title, message, parent=root)
     finally:
         root.destroy()
 
@@ -340,6 +362,7 @@ def _run_label_dialog() -> str:
         root = tk.Tk()
         root.withdraw()
         try:
+            _force_foreground(root)
             value = simpledialog.askstring(
                 "Generate connection request",
                 "Optional label for this sub machine (leave blank for a default name):",
@@ -392,6 +415,7 @@ def _run_connection_dialog() -> str | None:
             tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
             dialog.protocol("WM_DELETE_WINDOW", _cancel)
             dialog.transient(root)
+            _force_foreground(dialog)
             dialog.grab_set()
             root.wait_window(dialog)
         finally:
