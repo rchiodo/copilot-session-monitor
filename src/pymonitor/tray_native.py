@@ -440,7 +440,15 @@ def _run_connection_dialog() -> str | None:
             tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
             dialog.protocol("WM_DELETE_WINDOW", _cancel)
             dialog.transient(root)
-            _debug("connection dialog: widgets built, forcing foreground")
+            # A Toplevel created under a withdrawn root can itself start
+            # (and stay) in Tk's "withdrawn" wm state on some Windows/Tcl
+            # builds -- confirmed via the poll diagnostic below, which kept
+            # reporting state=withdrawn/viewable=0/geometry=1x1+0+0 forever.
+            # `_force_foreground()`'s lift()/focus_force() are no-ops on a
+            # window that was never mapped in the first place, so this
+            # dialog needs an explicit deiconify() to actually appear.
+            dialog.deiconify()
+            _debug("connection dialog: widgets built, deiconified, forcing foreground")
             _force_foreground(dialog)
             _debug("connection dialog: calling grab_set()")
             dialog.grab_set()
