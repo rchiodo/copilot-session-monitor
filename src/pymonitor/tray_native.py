@@ -562,7 +562,21 @@ class CollectorNativeTray:
     def _on_generate(self, icon: Any, item: Any) -> None:
         label = _run_label_dialog()
         assert self._loop is not None
-        asyncio.run_coroutine_threadsafe(self._generate_connection(label), self._loop)
+        future = asyncio.run_coroutine_threadsafe(self._generate_connection(label), self._loop)
+        # Block pystray's own callback thread (this one) until pairing
+        # finishes, then refresh the menu from *this* thread. pystray's
+        # Win32 backend rebuilds the native HMENU in-place
+        # (win32.DestroyMenu + recreate) with no locking against the
+        # tray's own message-loop thread, which reads self._menu_handle
+        # whenever the user right-clicks the icon. Calling update_menu()
+        # from any other thread (e.g. the asyncio loop thread, as this
+        # used to do from inside _generate_connection) races with that
+        # read/track-popup-menu sequence and can leave the tray with a
+        # destroyed menu handle -- the entire menu silently stops
+        # responding. See pystray's _win32.py Icon._update_menu/_on_notify.
+        future.result()
+        assert self._icon is not None
+        self._icon.update_menu()
 
     def _on_stop_clicked(self, icon: Any, item: Any) -> None:
         assert self._loop is not None
@@ -624,12 +638,11 @@ class CollectorNativeTray:
             "Connection string copied",
             'Valid for pairing one machine. Paste it on the other PC using "Connect to host...".',
         )
-        # pystray only auto-refreshes the native menu right as this click
-        # handler is invoked (before the pairing above has happened), so
-        # the new reporter wouldn't show up in the "Recopy..." submenu
-        # until some unrelated later menu interaction without this.
-        assert self._icon is not None
-        self._icon.update_menu()
+        # The new reporter needs the "Recopy..." submenu refreshed so it
+        # shows up immediately, but that must happen on pystray's own tray
+        # thread (see _on_generate, which blocks on this coroutine and
+        # then calls self._icon.update_menu() itself) rather than here on
+        # the asyncio loop thread.
 
     async def _recopy_connection(self, reporter_id: str, label: str) -> None:
         from .server import recopy_connection
