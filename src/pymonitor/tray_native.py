@@ -277,6 +277,21 @@ class _ToastWorker:
 _T = TypeVar("_T")
 
 
+def _debug(message: str) -> None:
+    """Diagnostic logging for the "Connect to host..." dialog-hang bug
+    (dialog opens invisibly / whole tray menu freezes, with no exception
+    ever raised -- see `_run_in_dedicated_thread` and `_run_connection_dialog`).
+
+    Writes to stderr, which the launcher redirects to
+    `.local/{role}-error.log`, with an explicit `flush=True`: the watcher
+    process never exits under normal operation, and Python's default
+    buffering for a stream redirected to a file would otherwise hold these
+    lines unflushed indefinitely, making them useless for diagnosing a
+    hang while the process is still alive.
+    """
+    print(f"[tray debug] {datetime.now(timezone.utc).isoformat()} {message}", file=sys.stderr, flush=True)
+
+
 def _run_in_dedicated_thread(body: Callable[[], _T]) -> _T:
     """Run ``body`` on a brand-new, single-purpose thread and block the
     calling thread until it finishes, returning its result (or re-raising
@@ -296,13 +311,20 @@ def _run_in_dedicated_thread(body: Callable[[], _T]) -> _T:
     result: "queue.Queue[tuple[bool, Any]]" = queue.Queue(maxsize=1)
 
     def _runner() -> None:
+        _debug("dedicated thread: entered, calling body()")
         try:
-            result.put((True, body()))
+            value = body()
+            _debug("dedicated thread: body() returned normally")
+            result.put((True, value))
         except Exception as error:  # noqa: BLE001 - re-raised on the caller's thread below
+            _debug(f"dedicated thread: body() raised {error!r}")
             result.put((False, error))
 
+    _debug("caller: starting dedicated thread")
     threading.Thread(target=_runner, name="pymonitor-tray-dialog", daemon=True).start()
+    _debug("caller: thread started, blocking on result queue")
     ok, value = result.get()
+    _debug(f"caller: result queue returned ok={ok}")
     if not ok:
         raise value
     return value
@@ -389,10 +411,13 @@ def _run_connection_dialog() -> str | None:
     """
 
     def _body() -> str | None:
+        _debug("connection dialog: creating root Tk()")
         root = tk.Tk()
+        _debug("connection dialog: root Tk() created, withdrawing")
         root.withdraw()
         result: dict[str, str | None] = {"value": None}
         try:
+            _debug("connection dialog: creating Toplevel + widgets")
             dialog = tk.Toplevel(root)
             dialog.title("Connect to host")
             dialog.resizable(False, False)
@@ -415,11 +440,16 @@ def _run_connection_dialog() -> str | None:
             tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
             dialog.protocol("WM_DELETE_WINDOW", _cancel)
             dialog.transient(root)
+            _debug("connection dialog: widgets built, forcing foreground")
             _force_foreground(dialog)
+            _debug("connection dialog: calling grab_set()")
             dialog.grab_set()
+            _debug("connection dialog: grab_set() returned, calling wait_window()")
             root.wait_window(dialog)
+            _debug("connection dialog: wait_window() returned")
         finally:
             root.destroy()
+            _debug("connection dialog: root destroyed")
         return result["value"]
 
     return _run_in_dedicated_thread(_body)
@@ -631,7 +661,9 @@ class WatcherNativeTray:
     # -- menu actions (run on pystray's internal callback thread) ---------
 
     def _on_connect(self, icon: Any, item: Any) -> None:
+        _debug("_on_connect: menu callback invoked, calling _run_connection_dialog()")
         value = _run_connection_dialog()
+        _debug(f"_on_connect: _run_connection_dialog() returned (value is None: {value is None})")
         if value is None:
             return
         assert self._loop is not None
