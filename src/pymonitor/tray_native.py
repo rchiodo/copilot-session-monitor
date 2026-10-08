@@ -444,7 +444,29 @@ def _run_connection_dialog() -> str | None:
             _force_foreground(dialog)
             _debug("connection dialog: calling grab_set()")
             dialog.grab_set()
-            _debug("connection dialog: grab_set() returned, calling wait_window()")
+
+            def _poll_state() -> None:
+                # Scheduled via Tcl's own `after`, so it only ever fires if
+                # the Tcl event loop that `wait_window()` below drives is
+                # actually alive and pumping -- distinguishes "window exists
+                # but is invisible/off-screen/not receiving input" (these
+                # prints keep appearing) from "the event loop itself never
+                # started" (zero prints ever appear), which point at very
+                # different root causes for the wait_window() hang below.
+                try:
+                    _debug(
+                        "connection dialog: poll -- "
+                        f"viewable={dialog.winfo_viewable()} ismapped={dialog.winfo_ismapped()} "
+                        f"geometry={dialog.winfo_geometry()} state={dialog.state()} "
+                        f"exists={dialog.winfo_exists()}"
+                    )
+                except Exception as error:  # noqa: BLE001 - best-effort diagnostic only
+                    _debug(f"connection dialog: poll raised {error!r}, stopping poll")
+                    return
+                dialog.after(1000, _poll_state)
+
+            dialog.after(1000, _poll_state)
+            _debug("connection dialog: grab_set() returned, poll scheduled, calling wait_window()")
             root.wait_window(dialog)
             _debug("connection dialog: wait_window() returned")
         finally:
