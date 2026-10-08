@@ -21,6 +21,16 @@ function time(value, compact = false) {
   }) : 'unavailable';
 }
 
+// A family's parentAlert is always the parent's OWN alert timestamp, which can
+// predate a newer response from a descendant. The card's at-a-glance time must
+// never go backward relative to item.lastResponseAt (the already-correct
+// family-wide rollup from group_families()), so pick whichever is newer.
+function latestOf(a, b) {
+  if (!a) return b ?? null;
+  if (!b) return a;
+  return Date.parse(a) >= Date.parse(b) ? a : b;
+}
+
 function applyTheme(theme) {
   if (theme?.source === 'windows-apps' && ['light', 'dark'].includes(theme.mode)) {
     document.documentElement.dataset.theme = theme.mode;
@@ -111,7 +121,7 @@ function row(item) {
   if (item.members) {
     const alert = item.parentAlert;
     const label = alert && { finished: 'Finished', waiting: 'Needs input', error: 'Error', warning: 'Unconfirmed' }[alert.kind];
-    compact = alert ? `Parent alert: ${label} - ${time(alert.at, true)}`
+    compact = alert ? `Parent alert: ${label} - ${time(latestOf(alert.at, item.lastResponseAt), true)}`
       : hasFinishedTime ? `No parent alert; family finished ${time(item.finishedAt, true)}`
         : `No parent alert observed; ${item.lastResponseAt ? 'response' : 'first seen'} ${time(item.lastResponseAt ?? item.firstObservedAt, true)}`;
     text(parentAlert, alert ? `Parent's own monitor alert: ${label} at ${time(alert.at)}. ${alert.message}`

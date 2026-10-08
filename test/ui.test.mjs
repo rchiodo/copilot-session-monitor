@@ -254,6 +254,23 @@ test('one family card separates aggregate work from the parent alert and exposes
   assert.match(part(card, 'hierarchy-warning').textContent, /Recorded parent is missing/);
 });
 
+test('family card compact time reflects the most recent family activity even when the parent has an older own alert', async () => {
+  const compactTimeText = value => new Date(value).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' });
+  const parentAlertAt = '2026-10-02T20:00:00.000Z';
+  const descendantResponseAt = '2026-10-02T21:30:00.000Z';
+  const ownAlert = { sessionId: 'p', kind: 'finished', at: parentAlertAt, message: 'Parent current run finished' };
+  const parent = { ...session('finished', 'p'), title: 'Parent title' };
+  const child = { ...session('working', 'c'), title: 'Child title' };
+  const family = { ...parent, state: 'working', finishedAt: null, parentAlert: ownAlert,
+    lastResponseAt: descendantResponseAt, members: [parent, child], childCount: 1, runningCount: 1,
+    detail: 'One descendant working' };
+  const fixture = await page([family]);
+  const card = fixture.nodes.get('running').children[0];
+  // The parent's own alert (20:00) is older than a descendant's response (21:30); the
+  // card must surface the newer family-wide time, not go backward to the alert's time.
+  assert.equal(part(card, 'compact-time').textContent, `Parent alert: Finished - ${compactTimeText(descendantResponseAt)}`);
+});
+
 test('dismiss controls are distinct native buttons, only shown when a dismissKey exists, and never toggle disclosure', async () => {
   const finished = { ...session('finished'), dismissKey: 'a'.repeat(64) };
   const fixture = await page([finished, session('waiting'), session('error'), session('unknown'), session('working')]);
