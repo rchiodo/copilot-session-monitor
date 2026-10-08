@@ -439,14 +439,20 @@ def _run_connection_dialog() -> str | None:
             tk.Button(buttons, text="OK", width=8, command=_ok).pack(side="left", padx=4)
             tk.Button(buttons, text="Cancel", width=8, command=_cancel).pack(side="left")
             dialog.protocol("WM_DELETE_WINDOW", _cancel)
-            dialog.transient(root)
-            # A Toplevel created under a withdrawn root can itself start
-            # (and stay) in Tk's "withdrawn" wm state on some Windows/Tcl
-            # builds -- confirmed via the poll diagnostic below, which kept
-            # reporting state=withdrawn/viewable=0/geometry=1x1+0+0 forever.
-            # `_force_foreground()`'s lift()/focus_force() are no-ops on a
-            # window that was never mapped in the first place, so this
-            # dialog needs an explicit deiconify() to actually appear.
+            # `wm transient` has a documented side effect: whenever the
+            # master is withdrawn/iconified, Tk automatically withdraws the
+            # transient window too, and keeps re-applying that sync -- our
+            # `root` is permanently withdrawn (it's just an invisible
+            # parent), so making `dialog` transient to it kept forcing
+            # `dialog` back to Tk's "withdrawn" wm state forever, even after
+            # an explicit deiconify() (confirmed by the poll diagnostic
+            # below, which kept reporting state=withdrawn/viewable=0/
+            # geometry=1x1+0+0 forever). CPython's own
+            # `tkinter.simpledialog.Dialog` guards against exactly this with
+            # `if parent.winfo_viewable(): self.transient(parent)` -- mirror
+            # that guard here instead of calling transient() unconditionally.
+            if root.winfo_viewable():
+                dialog.transient(root)
             dialog.deiconify()
             _debug("connection dialog: widgets built, deiconified, forcing foreground")
             _force_foreground(dialog)
