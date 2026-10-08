@@ -280,7 +280,14 @@ def start_role(
         data_dir.mkdir(parents=True, exist_ok=True)
         executable = python_executable or sys.executable
         process = spawn(
-            [executable, "-m", "pymonitor.cli", role.cli_entry],
+            # "-u": force unbuffered stdio. Without it, CPython fully
+            # block-buffers stdout/stderr when they're redirected to a file
+            # (not a TTY), so the role's print()-based diagnostics -- e.g.
+            # watcher.py's repeated reporting-failure messages -- can sit
+            # unflushed in memory indefinitely instead of reaching
+            # {role.name}.log/{role.name}-error.log, making a genuinely
+            # failing process look silent.
+            [executable, "-u", "-m", "pymonitor.cli", role.cli_entry],
             cwd=str(root),
             stdout_path=data_dir / f"{role.name}.log",
             stderr_path=data_dir / f"{role.name}-error.log",
