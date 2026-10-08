@@ -14,26 +14,36 @@ the right address to pass to ``init-host.py`` is the main friction point in
 multi-machine setup: ``ipconfig``/``Get-NetIPAddress`` often lists several
 virtual adapters (Hyper-V switches, WSL) ahead of the real Wi-Fi/Ethernet
 one. This script picks the address the OS itself would use to reach the
-network (see ``configuration.detect_lan_address``) and applies it directly,
-equivalent to::
-
-    uv run init-host.py <detected-ip> 43188 --reconfigure
+network (see ``configuration.detect_lan_address``) and applies it via
+``launcher.ensure_lan_bind`` -- the same no-op-safe path
+``start-host.py --lan`` uses: if the collector is already configured for
+this exact address and port, nothing is touched. In particular, the TLS
+certificate is *not* regenerated when nothing changed, so already-paired
+remote watchers keep working. Only when the detected address or port
+actually differs does this stop the collector, reconfigure, and rotate the
+certificate -- equivalent to the old manual ``stop-host.py`` ->
+``init-host.py <detected-ip> <port> --reconfigure`` -> ``start-tray.py
+--host`` dance (which this script used to perform unconditionally on every
+run, even when nothing had changed -- silently invalidating every paired
+remote watcher's pinned certificate each time).
 
 Run with::
 
-    uv run detect-lan-ip.py [--port 43188] [--dry-run]
+    uv run detect-lan-ip.py [ingest-port] [--dry-run]
 
 ``--dry-run`` only prints the detected address; it does not touch the
-collector config. Stop the collector first (``uv run stop-host.py``) unless
-using ``--dry-run`` -- same requirement as ``init-host.py``.
+collector config or stop any running collector.
 """
 from __future__ import annotations
 
 import argparse
-import asyncio
 import sys
+from pathlib import Path
 
-from pymonitor.configuration import configuration_command, detect_lan_address
+from pymonitor.configuration import detect_lan_address
+from pymonitor.launcher import ensure_lan_bind
+
+ROOT = Path(__file__).resolve().parent
 
 
 def main() -> int:
@@ -48,24 +58,22 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    try:
-        address = detect_lan_address()
-    except RuntimeError as error:
-        print(f"LAN IP detection failed: {error}", file=sys.stderr)
-        return 1
-
     if args.dry_run:
+        try:
+            address = detect_lan_address()
+        except RuntimeError as error:
+            print(f"LAN IP detection failed: {error}", file=sys.stderr)
+            return 1
         print(address)
         return 0
 
-    print(f"Detected LAN IP: {address}")
-    command = ["initialize", address, str(args.ingest_port), "replace"]
     try:
-        asyncio.run(configuration_command(command))
-    except Exception as error:  # noqa: BLE001 - mirrors init-host.py's top-level catch.
+        address = ensure_lan_bind(ROOT, port=args.ingest_port)
+    except Exception as error:  # noqa: BLE001 - mirrors start-host.py's --lan handling.
         print(f"Collector initialization failed: {error}", file=sys.stderr)
         return 1
 
+    print(f"Collector bound to {address}:{args.ingest_port}.")
     return 0
 
 

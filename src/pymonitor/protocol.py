@@ -17,6 +17,7 @@ protocol.mjs file.
 from __future__ import annotations
 
 import base64
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -300,6 +301,11 @@ def _cert_der(pem: str) -> bytes:
     return cert.public_bytes(serialization.Encoding.DER)
 
 
+def _der_fingerprint_sha256(der: bytes) -> str:
+    """Short hex SHA-256 fingerprint of a DER certificate, for pin-mismatch diagnostics."""
+    return hashlib.sha256(der).hexdigest()[:16]
+
+
 def validate_pairing(value: dict[str, Any]) -> dict[str, Any]:
     _object(value, ["version", "reporterId", "label", "collectorUrl", "token", "certificate"])
     if (
@@ -408,7 +414,11 @@ async def request(pairing: dict[str, Any], route: str, body: dict[str, Any]) -> 
             async with session.post(url, data=data.encode("utf-8"), headers=headers, ssl=ssl_context) as response:
                 peer_der = _peer_certificate_der(response)
                 if peer_der is None or peer_der != expected_der:
-                    raise fail("Collector certificate pin mismatch")
+                    expected_fp = _der_fingerprint_sha256(expected_der)
+                    peer_fp = _der_fingerprint_sha256(peer_der) if peer_der is not None else "none"
+                    raise fail(
+                        f"Collector certificate pin mismatch (pinned {expected_fp}, server presented {peer_fp})"
+                    )
                 content = await _read_capped(response.content, 65536, "Collector response too large")
                 if response.status != 200:
                     raise fail(f"Collector rejected request ({response.status})", response.status)
