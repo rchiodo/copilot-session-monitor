@@ -563,20 +563,15 @@ class CollectorNativeTray:
         label = _run_label_dialog()
         assert self._loop is not None
         future = asyncio.run_coroutine_threadsafe(self._generate_connection(label), self._loop)
-        # Block pystray's own callback thread (this one) until pairing
-        # finishes, then refresh the menu from *this* thread. pystray's
-        # Win32 backend rebuilds the native HMENU in-place
-        # (win32.DestroyMenu + recreate) with no locking against the
-        # tray's own message-loop thread, which reads self._menu_handle
-        # whenever the user right-clicks the icon. Calling update_menu()
-        # from any other thread (e.g. the asyncio loop thread, as this
-        # used to do from inside _generate_connection) races with that
-        # read/track-popup-menu sequence and can leave the tray with a
-        # destroyed menu handle -- the entire menu silently stops
-        # responding. See pystray's _win32.py Icon._update_menu/_on_notify.
+        # Block until pairing finishes (writes the new reporter to
+        # collector.json) *before* returning. pystray calls update_menu()
+        # automatically after every menu-item click (see _handler's
+        # `inner()` in pystray's _base.py, which always runs
+        # `self.update_menu()` in a `finally` block once this method
+        # returns) -- so no explicit rebuild call is needed here, as long
+        # as the new reporter is already on disk by the time that
+        # automatic rebuild reads it back via `_recopy_menu_items()`.
         future.result()
-        assert self._icon is not None
-        self._icon.update_menu()
 
     def _on_stop_clicked(self, icon: Any, item: Any) -> None:
         assert self._loop is not None
@@ -610,14 +605,40 @@ class CollectorNativeTray:
         if not reporters:
             return (pystray.MenuItem("(no paired machines yet)", None, enabled=False),)
         return tuple(
-            pystray.MenuItem(
-                reporter["label"],
-                lambda icon, item, reporter_id=reporter["id"], label=reporter["label"]: self._on_recopy(
-                    reporter_id, label
-                ),
-            )
+            pystray.MenuItem(reporter["label"], self._make_recopy_action(reporter["id"], reporter["label"]))
             for reporter in reporters
         )
+
+    def _make_recopy_action(self, reporter_id: str, label: str) -> Callable[[Any, Any], None]:
+        """Returns a fresh 2-argument ``(icon, item)`` callable bound to one
+        reporter, for use as a `pystray.MenuItem` action.
+
+        This used to be an inline lambda capturing ``reporter_id``/``label``
+        via default-argument values (``lambda icon, item,
+        reporter_id=..., label=...: ...``), which *worked* for closure
+        capture but was a real, crash-causing bug: pystray's
+        `MenuItem._assert_action` inspects `action.__code__.co_argcount` to
+        decide how to call the action, and default-valued parameters still
+        count toward that total. A 4-argument lambda tripped the
+        `argcount > 2` branch and raised `ValueError` -- but only once a
+        machine was actually paired (an empty "(no paired machines yet)"
+        submenu never constructs the lambda at all), and only from deep
+        inside pystray's `_update_menu()`, *after* it had already destroyed
+        the previous native menu handle and before it could install the
+        replacement. That left `self._menu_handle` pointing at a destroyed
+        handle, which is what made the entire tray menu stop responding to
+        every click until the process was restarted -- this was never a
+        cross-thread timing issue. A dedicated function with exactly two
+        parameters (matching pystray's own `action(icon, menu_item)` call
+        convention) captures `reporter_id`/`label` through an ordinary
+        closure instead, one fresh scope per call, with no extra
+        parameters for pystray to miscount.
+        """
+
+        def _action(icon: Any, item: Any) -> None:
+            self._on_recopy(reporter_id, label)
+
+        return _action
 
     def _on_recopy(self, reporter_id: str, label: str) -> None:
         assert self._loop is not None
@@ -638,11 +659,11 @@ class CollectorNativeTray:
             "Connection string copied",
             'Valid for pairing one machine. Paste it on the other PC using "Connect to host...".',
         )
-        # The new reporter needs the "Recopy..." submenu refreshed so it
-        # shows up immediately, but that must happen on pystray's own tray
-        # thread (see _on_generate, which blocks on this coroutine and
-        # then calls self._icon.update_menu() itself) rather than here on
-        # the asyncio loop thread.
+        # The new reporter is now on disk; _on_generate blocks on this
+        # coroutine before returning, so pystray's own automatic
+        # post-click update_menu() (see _on_generate) picks it up and
+        # refreshes the "Recopy..." submenu without any explicit call
+        # from here.
 
     async def _recopy_connection(self, reporter_id: str, label: str) -> None:
         from .server import recopy_connection

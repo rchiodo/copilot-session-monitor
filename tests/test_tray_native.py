@@ -226,6 +226,42 @@ async def test_collector_tray_generate_connection_failure_shows_error(
     assert errors and errors[0][0] == "Connection failed"
 
 
+async def test_collector_tray_recopy_menu_items_with_reporters_builds_valid_menu(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression test for a real pystray.MenuItem construction failure:
+    once at least one machine is paired, `_recopy_menu_items()` used to
+    build each submenu entry's action as a lambda with 4 parameters
+    (`icon, item, reporter_id=..., label=...`). pystray's
+    `MenuItem._assert_action` inspects `action.__code__.co_argcount` and
+    raises `ValueError` for anything other than 0, 1, or 2 -- default
+    argument values still count toward that total. This never surfaced
+    with zero paired machines, since the lambda is only constructed
+    inside the per-reporter generator expression. `pystray.MenuItem` is
+    *not* mocked by the `_fake_icon` fixture, so calling the real method
+    here exercises pystray's real validation path.
+    """
+    server = _fake_server()
+    tray = CollectorNativeTray(server, asyncio.Event())
+    await tray.start()
+
+    reporters = [
+        {"id": "aaa", "label": "rchiodo-bigboy"},
+        {"id": "bbb", "label": "rchiodo-laptop"},
+    ]
+    monkeypatch.setattr("pymonitor.server.remote_reporters_sync", lambda: reporters)
+
+    items = tray._recopy_menu_items()
+
+    assert [item.text for item in items] == ["rchiodo-bigboy", "rchiodo-laptop"]
+
+    recopied: list[tuple[str, str]] = []
+    monkeypatch.setattr(tray, "_on_recopy", lambda reporter_id, label: recopied.append((reporter_id, label)))
+    items[0](None)
+    items[1](None)
+    assert recopied == [("aaa", "rchiodo-bigboy"), ("bbb", "rchiodo-laptop")]
+
+
 async def test_collector_tray_shutdown_is_idempotent() -> None:
     server = _fake_server()
     tray = CollectorNativeTray(server, asyncio.Event())
