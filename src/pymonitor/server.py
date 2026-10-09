@@ -35,12 +35,10 @@ from aiohttp import web
 from .actions import DismissError, MonitorActions, read_dismiss_entries
 from .collector import Collector
 from .configuration import (
-    connection_string_for_reporter,
     data_dir,
     ensure_local_reporter,
     initialize,
     list_remote_reporters,
-    list_remote_reporters_sync,
     load_collector,
     migrate_legacy,
     pair_connection_string,
@@ -591,16 +589,3 @@ async def remote_reporters() -> list[dict[str, str]]:
     same way `pair_connection` already does, rather than importing
     `configuration.py` directly."""
     return await list_remote_reporters()
-
-
-def remote_reporters_sync() -> list[dict[str, str]]:
-    """Synchronous twin of `remote_reporters()` -- see
-    `list_remote_reporters_sync()`'s docstring for why this exists."""
-    return list_remote_reporters_sync()
-
-
-async def recopy_connection(reporter_id: str) -> str:
-    """Thin wrapper around `connection_string_for_reporter` -- see
-    `pair_connection`'s docstring for why `tray_native.py` goes through
-    `server.py` instead of importing `configuration.py` directly."""
-    return await connection_string_for_reporter(reporter_id)

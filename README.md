@@ -73,7 +73,7 @@ Not sure which IP to use? `uv run detect-lan-ip.py` picks the address this PC wo
 
 This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
 
-At the collector's console, you'll see a numbered menu; type `3` for **Generate connection request** and press Enter. When prompted, optionally type a label to identify the source PC (e.g. "Development laptop"), then press Enter. A connection string — prefixed `csm1:` — is copied to the clipboard and printed as `Connection string copied to clipboard. Valid for pairing one machine. Paste it on the other PC using the "Connect to host" option.` The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
+At the collector's console, you'll see a numbered menu; type `3` for **Generate connection request** and press Enter. When prompted, optionally type a label to identify the source PC (e.g. "Development laptop"), then press Enter. A connection string — prefixed `csm1:` — is copied to the clipboard and printed to the console as `Connection string: csm1:...`, followed by `Copied to clipboard. Valid for pairing one machine. Paste it on the other PC using the "Connect to host" option.` The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
 
 **On each remote Windows PC**, with the source checked out, start the console app in its default child/watcher mode:
 
@@ -95,7 +95,7 @@ No remote production connectivity is assumed just because local tests pass. Afte
 
 | Command | Role |
 | --- | --- |
-| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`; its console menu offers numbered **Generate connection request**/**Recopy connection string** options for pairing. |
+| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`; its console menu offers a numbered **Generate connection request** option for pairing. |
 | `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`; its console menu offers a numbered **Connect to host** option for pairing. |
 | `uv run init-host.py` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
 | `uv run detect-lan-ip.py` | Detect this PC's LAN-reachable IP and apply it (no-op-safe: only reconfigures/rotates the certificate if the address or port actually changed). Add `--dry-run` to only print the detected address. |

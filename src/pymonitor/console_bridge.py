@@ -225,8 +225,7 @@ class CollectorConsoleBridge:
         print("1. Open dashboard")
         print("2. Test notification")
         print("3. Generate connection request")
-        print("4. Recopy connection string")
-        print("5. Stop")
+        print("4. Stop")
         print()
 
     def _console_loop(self) -> None:
@@ -252,8 +251,6 @@ class CollectorConsoleBridge:
             elif choice == 3:
                 self._cmd_generate()
             elif choice == 4:
-                self._cmd_recopy()
-            elif choice == 5:
                 self._cmd_stop()
                 return
             else:
@@ -275,34 +272,6 @@ class CollectorConsoleBridge:
         future = asyncio.run_coroutine_threadsafe(self._generate_connection(label), self._loop)
         future.result()
 
-    def _cmd_recopy(self) -> None:
-        from .server import remote_reporters_sync
-
-        try:
-            reporters = remote_reporters_sync()
-        except Exception as error:  # noqa: BLE001 - mirrors tray_native's menu-building guard
-            print(f"Could not list paired machines ({error})")
-            return
-        if not reporters:
-            print("(no paired machines yet)")
-            return
-        print("Paired machines:")
-        for index, reporter in enumerate(reporters, start=1):
-            print(f"  {index}. {reporter['label']}")
-        choice = input("Recopy connection string for # (blank to cancel): ").strip()
-        if not choice:
-            return
-        try:
-            reporter = reporters[int(choice) - 1]
-        except (ValueError, IndexError):
-            print("Invalid selection.")
-            return
-        assert self._loop is not None
-        future = asyncio.run_coroutine_threadsafe(
-            self._recopy_connection(reporter["id"], reporter["label"]), self._loop
-        )
-        future.result()
-
     def _cmd_stop(self) -> None:
         assert self._loop is not None
         future = asyncio.run_coroutine_threadsafe(self._server.stop(), self._loop)
@@ -317,21 +286,11 @@ class CollectorConsoleBridge:
             print(f"Connection request failed ({type(error).__name__})")
             return
         _copy_to_clipboard(value)
+        print(f"Connection string: {value}")
         print(
-            'Connection string copied to clipboard. Valid for pairing one machine. '
+            'Copied to clipboard. Valid for pairing one machine. '
             "Paste it on the other PC using the 'Connect to host' option."
         )
-
-    async def _recopy_connection(self, reporter_id: str, label: str) -> None:
-        from .server import recopy_connection
-
-        try:
-            value = await recopy_connection(reporter_id)
-        except Exception as error:  # noqa: BLE001 - mirrors _generate_connection's failure path
-            print(f"Recopy connection string failed ({type(error).__name__})")
-            return
-        _copy_to_clipboard(value)
-        print(f"Connection string for {label} copied to clipboard. Paste it on that machine using 'Connect to host'.")
 
     # -- polling/power callbacks (run on background poll/power threads) ---
 

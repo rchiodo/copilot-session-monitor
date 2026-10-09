@@ -149,7 +149,9 @@ async def test_collector_bridge_generate_connection_success_copies_clipboard(
 
     await bridge._generate_connection("my-label")
     assert copied == ["csm1:xyz"]
-    assert "copied to clipboard" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "csm1:xyz" in out
+    assert "Copied to clipboard" in out
 
 
 async def test_collector_bridge_generate_connection_failure_prints_error(
@@ -165,110 +167,6 @@ async def test_collector_bridge_generate_connection_failure_prints_error(
     monkeypatch.setattr("pymonitor.server.pair_connection", _fake_pair_connection)
     await bridge._generate_connection("")
     assert "Connection request failed" in capsys.readouterr().out
-
-
-async def test_collector_bridge_recopy_connection_success_copies_clipboard(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-
-    async def _fake_recopy_connection(reporter_id: str) -> str:
-        assert reporter_id == "aaa"
-        return "csm1:xyz"
-
-    monkeypatch.setattr("pymonitor.server.recopy_connection", _fake_recopy_connection)
-    copied: list[str] = []
-    monkeypatch.setattr(cb, "_copy_to_clipboard", copied.append)
-
-    await bridge._recopy_connection("aaa", "rchiodo-bigboy")
-    assert copied == ["csm1:xyz"]
-    out = capsys.readouterr().out
-    assert "rchiodo-bigboy" in out and "copied to clipboard" in out
-
-
-async def test_collector_bridge_recopy_connection_failure_prints_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-
-    async def _fake_recopy_connection(reporter_id: str) -> str:
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr("pymonitor.server.recopy_connection", _fake_recopy_connection)
-    await bridge._recopy_connection("aaa", "rchiodo-bigboy")
-    assert "Recopy connection string failed" in capsys.readouterr().out
-
-
-async def test_collector_bridge_cmd_recopy_no_paired_machines(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-    monkeypatch.setattr("pymonitor.server.remote_reporters_sync", lambda: [])
-    bridge._cmd_recopy()
-    assert "no paired machines" in capsys.readouterr().out
-
-
-async def test_collector_bridge_cmd_recopy_lists_and_dispatches_selection(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-    reporters = [
-        {"id": "aaa", "label": "rchiodo-bigboy"},
-        {"id": "bbb", "label": "rchiodo-laptop"},
-    ]
-    monkeypatch.setattr("pymonitor.server.remote_reporters_sync", lambda: reporters)
-    monkeypatch.setattr(cb, "input", lambda prompt="": "2", raising=False)
-    recopied: list[tuple[str, str]] = []
-
-    async def _fake_recopy(reporter_id: str, label: str) -> None:
-        recopied.append((reporter_id, label))
-
-    monkeypatch.setattr(bridge, "_recopy_connection", _fake_recopy)
-    # _cmd_recopy blocks on future.result() for the valid-selection branch,
-    # exactly like it does on its real background console thread -- so it
-    # must run off the test's own event-loop thread here too, or the
-    # scheduled `_recopy_connection` coroutine could never get a turn to run.
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, bridge._cmd_recopy)
-    out = capsys.readouterr().out
-    assert "rchiodo-bigboy" in out and "rchiodo-laptop" in out
-    assert recopied == [("bbb", "rchiodo-laptop")]
-
-
-async def test_collector_bridge_cmd_recopy_blank_choice_cancels(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-    reporters = [{"id": "aaa", "label": "rchiodo-bigboy"}]
-    monkeypatch.setattr("pymonitor.server.remote_reporters_sync", lambda: reporters)
-    monkeypatch.setattr(cb, "input", lambda prompt="": "", raising=False)
-    mock_recopy = AsyncMock()
-    monkeypatch.setattr(bridge, "_recopy_connection", mock_recopy)
-    bridge._cmd_recopy()
-    mock_recopy.assert_not_called()
-
-
-async def test_collector_bridge_cmd_recopy_invalid_choice_prints_error(
-    monkeypatch: pytest.MonkeyPatch, capsys: Any
-) -> None:
-    server = _fake_server()
-    bridge = CollectorConsoleBridge(server, asyncio.Event())
-    await bridge.start()
-    reporters = [{"id": "aaa", "label": "rchiodo-bigboy"}]
-    monkeypatch.setattr("pymonitor.server.remote_reporters_sync", lambda: reporters)
-    monkeypatch.setattr(cb, "input", lambda prompt="": "9", raising=False)
-    bridge._cmd_recopy()
-    assert "Invalid selection" in capsys.readouterr().out
 
 
 async def test_collector_bridge_cmd_stop_stops_server_and_sets_event() -> None:
@@ -288,7 +186,7 @@ async def test_collector_bridge_console_loop_dispatches_known_commands(monkeypat
     calls: list[str] = []
     monkeypatch.setattr(bridge, "_cmd_open", lambda: calls.append("open"))
     monkeypatch.setattr(bridge, "_cmd_test", lambda: calls.append("test"))
-    lines = iter(["1", "2", "  ", "5"])
+    lines = iter(["1", "2", "  ", "4"])
     monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: calls.append("stop"))
     bridge._console_loop()
@@ -301,7 +199,7 @@ async def test_collector_bridge_console_loop_unknown_command_prints_message(
     server = _fake_server()
     bridge = CollectorConsoleBridge(server, asyncio.Event())
     await bridge.start()
-    lines = iter(["bogus", "5"])
+    lines = iter(["bogus", "4"])
     monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: None)
     bridge._console_loop()
