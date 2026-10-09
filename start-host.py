@@ -8,8 +8,10 @@
 # ///
 """Start the collector (host) role.
 
-Port of ``Start-Host-Headless.ps1`` (which just forwarded to
-``scripts/Start-Role.ps1 -Role collector``). Run with::
+Runs the collector attached to this console: it prints directly to this
+terminal (no `.local/collector.log` to tail) and stays in the foreground
+until you type ``stop`` (or ``quit``/``exit``) at its prompt, or press
+Ctrl+C. Run with::
 
     uv run start-host.py [--no-browser] [--lan [--lan-port PORT]]
 
@@ -20,16 +22,15 @@ ephemeral virtual environment on first use.
 By default the collector binds loopback-only (127.0.0.1) -- no LAN
 interface is opened. Pass ``--lan`` to make it reachable from other
 machines on your network: this automates the manual
-``stop-host.py`` -> ``detect-lan-ip.py`` -> ``start-tray.py --host``
-dance into a single command.
+``stop-host.py`` -> ``detect-lan-ip.py`` dance into a single command.
 """
 from __future__ import annotations
 
 import argparse
-import webbrowser
 from pathlib import Path
 
-from pymonitor.launcher import COLLECTOR_ROLE, LauncherError, ensure_lan_bind, start_role
+from pymonitor.cli import host_main
+from pymonitor.launcher import ensure_lan_bind
 
 ROOT = Path(__file__).resolve().parent
 
@@ -39,7 +40,7 @@ def main() -> int:
     parser.add_argument(
         "--no-browser",
         action="store_true",
-        help="Do not open the dashboard in a browser once the collector is healthy.",
+        help="Do not open the dashboard in a browser once the collector starts.",
     )
     parser.add_argument(
         "--lan",
@@ -67,18 +68,7 @@ def main() -> int:
             return 1
         print(f"Reconfigured collector to bind {address}:{args.lan_port}.")
 
-    try:
-        result = start_role(
-            ROOT,
-            COLLECTOR_ROLE,
-            no_browser=args.no_browser,
-            open_browser=webbrowser.open,
-        )
-    except LauncherError as error:
-        print(f"error: {error}")
-        return 1
-
-    print(f"Collector is live at {result.runtime['url']}")
+    host_main(["--no-browser"] if args.no_browser else [])
     return 0
 
 

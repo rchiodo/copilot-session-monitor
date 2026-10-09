@@ -1,30 +1,24 @@
 """Testable launcher logic behind the PEP 723 standalone scripts.
 
-Ports the real behavior of ``scripts/Start-Role.ps1`` and
-``scripts/Stop-Role.ps1`` (and, by extension, the six thin root-level
-wrappers that used to call into them: ``Initialize-Host.ps1``,
-``Start-Host-Headless.ps1``, ``Start-Client-Headless.ps1``,
-``Start-Tray.ps1``, ``Stop-Host.ps1``, ``Stop-Client.ps1``) into importable,
-unit-testable functions. The two PowerShell "role" scripts had no direct
-user-facing entry point of their own -- they were only ever invoked by the
-six wrapper scripts -- so their logic is absorbed into this module rather
-than becoming two more standalone scripts; the replacement PEP 723 scripts
-(``start-host.py``, ``start-client.py``, ``start-tray.py``, ``stop-host.py``,
-``stop-client.py``, ``init-host.py``) are thin argument-parsing wrappers
-around the functions here.
+Ports the remaining non-spawn behavior of ``scripts/Stop-Role.ps1`` (and,
+by extension, the wrapper scripts that used to call into it:
+``Stop-Host.ps1``, ``Stop-Client.ps1``) into importable, unit-testable
+functions, plus the runtime-file discovery helpers shared by the stop
+scripts and the ``--lan`` reconfiguration path. Startup is no longer a
+detached background spawn: ``start-host.py``/``start-client.py``/
+``start-tray.py`` now call ``pymonitor.cli``'s ``host_main``/``client_main``
+directly and run attached to the console.
 
-Every HTTP call, spawn, and sleep is injectable so tests never need a real
+Every HTTP call and sleep is injectable so tests never need a real
 collector/watcher process or network socket. Defaults use the stdlib
-(``urllib.request``) and ``subprocess.Popen`` so the PEP 723 scripts need no
-dependency beyond the editable ``pymonitor`` package itself.
+(``urllib.request``) so the PEP 723 scripts need no dependency beyond the
+editable ``pymonitor`` package itself.
 """
 from __future__ import annotations
 
 import json
 import os
 import re
-import subprocess
-import sys
 import time
 import urllib.error
 import urllib.request
@@ -38,13 +32,10 @@ __all__ = [
     "COLLECTOR_ROLE",
     "WATCHER_ROLE",
     "ROLES",
-    "StartResult",
     "data_dir_for",
-    "check_python_version",
     "load_runtime",
     "probe_status",
     "get_live_role",
-    "start_role",
     "stop_role",
     "ensure_lan_bind",
 ]
@@ -87,34 +78,12 @@ WATCHER_ROLE = RoleConfig("watcher", "client", "watcher-runtime.json", "/status"
 ROLES = {"collector": COLLECTOR_ROLE, "watcher": WATCHER_ROLE}
 
 
-@dataclass
-class StartResult:
-    """What `start_role` learned once a role was confirmed running."""
-
-    runtime: dict[str, Any]
-    status: dict[str, Any]
-    paired_pending: bool  # watcher-only: started but not yet paired with a host
-
-
 def data_dir_for(root: Path, env: dict[str, str] | None = None) -> Path:
     """Port of Start-Role.ps1's `$data` resolution: `$env:MONITOR_DATA_DIR`
     or `<repo root>/.local`."""
     env = os.environ if env is None else env
     configured = env.get("MONITOR_DATA_DIR")
     return Path(configured) if configured else root / ".local"
-
-
-def check_python_version(
-    minimum: tuple[int, int] = (3, 11), *, version_info: tuple[int, int] | None = None
-) -> None:
-    """Port of Start-Role.ps1's `python -c "import sys; ..."` version gate.
-    Less load-bearing now that `uv run` pins the interpreter per the
-    script's `requires-python`, but kept as the same sanity check."""
-    actual = version_info if version_info is not None else (sys.version_info[0], sys.version_info[1])
-    if actual < minimum:
-        raise LauncherError(
-            f"Python {minimum[0]}.{minimum[1]} or newer is required; found {actual[0]}.{actual[1]}."
-        )
 
 
 def _validate_url(url: str) -> None:
@@ -221,112 +190,6 @@ def get_live_role(
     return None
 
 
-SpawnFn = Callable[..., "subprocess.Popen[bytes]"]
-
-
-def _default_spawn(args: list[str], *, cwd: str, stdout_path: Path, stderr_path: Path) -> "subprocess.Popen[bytes]":
-    creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    stdout_file = stdout_path.open("ab")
-    stderr_file = stderr_path.open("ab")
-    try:
-        return subprocess.Popen(
-            args,
-            cwd=cwd,
-            stdout=stdout_file,
-            stderr=stderr_file,
-            creationflags=creationflags,
-            close_fds=True,
-        )
-    finally:
-        # Popen has already duplicated the handles into the child; the
-        # parent-side file objects can be closed immediately (same pattern
-        # Start-Role.ps1 relied on via `-RedirectStandardOutput`/`-Error`,
-        # which likewise doesn't keep the PowerShell-side handle open).
-        stdout_file.close()
-        stderr_file.close()
-
-
-def start_role(
-    root: Path,
-    role: RoleConfig,
-    *,
-    no_browser: bool = False,
-    data_dir: Path | None = None,
-    python_executable: str | None = None,
-    http_get_json: HttpGetJson = _default_http_get_json,
-    spawn: SpawnFn = _default_spawn,
-    sleep: Callable[[float], None] = time.sleep,
-    open_browser: Callable[[str], None] | None = None,
-    startup_attempts: int = 60,
-    startup_interval: float = 0.5,
-    health_attempts: int = 60,
-    health_timeout: float = 3.0,
-) -> StartResult:
-    """Port of Start-Role.ps1. Reuses an already-live, matching-identity
-    instance; otherwise spawns `python -m pymonitor.cli {host|client}` as a
-    hidden background process and polls for it to come up healthy.
-
-    Raises `LauncherError` for every condition the original script
-    `throw`s on: unsupported Python version, the spawned process exiting
-    before it answers, no response within the startup window, or a
-    response that never reports healthy (outside the watcher's "started
-    but not yet paired" case, which is not an error).
-    """
-    data_dir = data_dir if data_dir is not None else data_dir_for(root)
-    check_python_version()
-
-    runtime = get_live_role(data_dir, role, http_get_json=http_get_json)
-    if runtime is None:
-        data_dir.mkdir(parents=True, exist_ok=True)
-        executable = python_executable or sys.executable
-        process = spawn(
-            # "-u": force unbuffered stdio. Without it, CPython fully
-            # block-buffers stdout/stderr when they're redirected to a file
-            # (not a TTY), so the role's print()-based diagnostics -- e.g.
-            # watcher.py's repeated reporting-failure messages -- can sit
-            # unflushed in memory indefinitely instead of reaching
-            # {role.name}.log/{role.name}-error.log, making a genuinely
-            # failing process look silent.
-            [executable, "-u", "-m", "pymonitor.cli", role.cli_entry],
-            cwd=str(root),
-            stdout_path=data_dir / f"{role.name}.log",
-            stderr_path=data_dir / f"{role.name}-error.log",
-        )
-        for _ in range(startup_attempts):
-            sleep(startup_interval)
-            runtime = get_live_role(data_dir, role, http_get_json=http_get_json)
-            if runtime is not None:
-                break
-            if process.poll() is not None:
-                raise LauncherError(
-                    f"{role.name} exited before responding. See .local/{role.name}-error.log."
-                )
-        if runtime is None:
-            raise LauncherError(f"{role.name} did not respond. See .local/{role.name}-error.log.")
-
-    status: dict[str, Any] = {}
-    for _ in range(health_attempts):
-        status = http_get_json(f"{runtime['url']}{role.status_endpoint}", health_timeout)
-        if status.get("healthy"):
-            break
-        if role.name == "watcher" and status.get("paired") is False:
-            break
-        sleep(startup_interval)
-
-    if role.name == "watcher" and status.get("paired") is False:
-        return StartResult(runtime=runtime, status=status, paired_pending=True)
-    if not status.get("healthy"):
-        raise LauncherError(
-            f"{role.name} is running but not healthy. "
-            f"Check .local/{role.name}-error.log and collector source coverage."
-        )
-
-    if role.name == "collector" and not no_browser and open_browser is not None:
-        open_browser(runtime["url"])
-
-    return StartResult(runtime=runtime, status=status, paired_pending=False)
-
-
 def stop_role(
     root: Path,
     role: RoleConfig,
@@ -423,8 +286,9 @@ def ensure_lan_bind(
 ) -> str:
     """Collapse the manual "stop, detect, reconfigure" multi-machine setup
     dance (``stop-host.py`` then ``detect-lan-ip.py``/``init-host.py
-    --reconfigure``) into the one step `start_role` needs before spawning a
-    collector that should be LAN-reachable instead of loopback-only.
+    --reconfigure``) into the one step ``start-host.py --lan``/
+    ``start-tray.py --host --lan`` needs before starting a collector that
+    should be LAN-reachable instead of loopback-only.
 
     Stops any live collector first -- `initialize()` refuses to run while
     one owns the data directory -- then detects this machine's LAN-facing
@@ -442,9 +306,9 @@ def ensure_lan_bind(
     time ``--lan`` is re-run, even when nothing actually changed.
 
     This is only ever invoked explicitly (e.g. a ``--lan`` flag), never
-    unconditionally from `start_role`: a fresh collector binding loopback-
-    only by default -- no LAN interface opened -- is a deliberate privacy
-    posture that must stay opt-in.
+    automatically when starting a collector: a fresh collector binding
+    loopback-only by default -- no LAN interface opened -- is a deliberate
+    privacy posture that must stay opt-in.
     """
     data_dir = data_dir if data_dir is not None else data_dir_for(root)
     address = detect_lan_address()

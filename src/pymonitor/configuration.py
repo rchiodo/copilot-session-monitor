@@ -497,7 +497,7 @@ async def pair_connection_string(label: str) -> str:
 
 async def list_remote_reporters() -> list[dict[str, str]]:
     """Non-legacy (remote/sub-machine) reporters currently paired to this
-    collector, for display in the tray's "recopy connection string" menu.
+    collector, for display in the console bridge's "recopy" command.
 
     Excludes the local self-watcher reporter (``legacy`` is ``True``) and
     any reporter that has since been revoked -- i.e. removed from
@@ -511,15 +511,15 @@ async def list_remote_reporters() -> list[dict[str, str]]:
 def list_remote_reporters_sync() -> list[dict[str, str]]:
     """Synchronous twin of `list_remote_reporters()`.
 
-    The native tray's "Recopy connection string for..." submenu is rebuilt
-    by pystray on its own dedicated callback thread and needs the reporter
-    list back immediately (see `tray_native.py`'s `_recopy_menu_items()`).
-    Reading `collector.json` is a small, local, synchronous file read that
-    doesn't actually need the collector's asyncio event loop at all, so
-    this avoids bridging onto that loop with a blocking
-    `.result(timeout=...)` -- which was observed to reliably time out
-    (leaving the submenu stuck on a placeholder) whenever the loop was busy,
-    e.g. servicing a watcher's TLS connection attempts.
+    The console bridge's "recopy" command (see `console_bridge.py`'s
+    `_cmd_recopy()`) needs the paired-machine list back immediately, before
+    it can prompt the user to pick one. Reading `collector.json` is a
+    small, local, synchronous file read that doesn't actually need the
+    collector's asyncio event loop at all, so this avoids bridging onto
+    that loop with a blocking `.result(timeout=...)` -- which was observed
+    to reliably time out (leaving the old native tray's submenu stuck on a
+    placeholder) whenever the loop was busy, e.g. servicing a watcher's TLS
+    connection attempts.
     """
     config = validate_collector(json.loads((data_dir / "collector.json").read_text(encoding="utf-8")))
     return [{"id": row["id"], "label": row["label"]} for row in config["reporters"] if not row["legacy"]]

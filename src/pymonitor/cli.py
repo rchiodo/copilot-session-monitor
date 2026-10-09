@@ -3,20 +3,23 @@
 Ports the three standalone scripts that used to be run directly with `node`
 (`server.mjs`, `watcher.mjs`, `configuration.mjs`) into installable console
 entry points. There is deliberately no separate "tray" entry point:
-`CollectorNativeTray`/`WatcherNativeTray` (see `tray_native.py`) run
-in-process -- as of Phase 4 there is no `windows/tray.ps1` subprocess to
-spawn at all. `host_main`/`client_main` are the only processes a launcher
-script needs to start.
+`CollectorConsoleBridge`/`WatcherConsoleBridge` (see `console_bridge.py`)
+run in-process -- there is no detached subprocess to spawn at all.
+`host_main`/`client_main` run attached to the launching console (blocking
+until the "stop"/"quit" command or Ctrl+C) and are the only processes a
+launcher script needs to start.
 """
 from __future__ import annotations
 
+import argparse
 import asyncio
 import signal
 import sys
+import webbrowser
 
 from .configuration import configuration_command
+from .console_bridge import CollectorConsoleBridge, WatcherConsoleBridge
 from .server import CollectorServer
-from .tray_native import CollectorNativeTray, WatcherNativeTray
 from .watcher import Watcher
 
 __all__ = ["host_main", "client_main", "config_main"]
@@ -35,17 +38,24 @@ async def _run_until_signalled(stop: asyncio.Event) -> None:
     await stop.wait()
 
 
-async def _host() -> None:
+async def _host(*, no_browser: bool = False) -> None:
     server = CollectorServer()
-    # `stop` is threaded into the tray so its "Stop collector" menu item can
+    # `stop` is threaded into the bridge so its "stop" console command can
     # unblock `_run_until_signalled` (and thus exit the process) in addition
-    # to tearing down the server -- the native tray's "Stop" otherwise has
-    # no OS-level signal to raise the way tray.ps1's subprocess exiting did.
+    # to tearing down the server -- a console "stop" otherwise has no OS-
+    # level signal to raise the way tray.ps1's subprocess exiting did.
     stop = asyncio.Event()
-    bridge = CollectorNativeTray(server, stop)
+    bridge = CollectorConsoleBridge(server, stop)
     server.bridge = bridge
     await bridge.start()
     await server.start()
+    # The launcher used to poll the (then-detached) collector's /api/status
+    # over HTTP from the parent process until healthy, then open the
+    # browser. Now that the collector runs attached in this same process,
+    # it's already bridge_ready/healthy by the time server.start() returns,
+    # so the browser can be opened immediately with no polling needed.
+    if not no_browser:
+        webbrowser.open(server.url)
     try:
         await _run_until_signalled(stop)
     finally:
@@ -55,7 +65,7 @@ async def _host() -> None:
 async def _client() -> None:
     watcher = Watcher()
     stop = asyncio.Event()
-    bridge = WatcherNativeTray(watcher, stop)
+    bridge = WatcherConsoleBridge(watcher, stop)
     watcher.bridge = bridge
     await bridge.start()
     await watcher.start()
@@ -65,12 +75,22 @@ async def _client() -> None:
         await watcher.stop()
 
 
-def host_main() -> None:
+def host_main(argv: list[str] | None = None) -> None:
     """`pymonitor-host` -- ports `node src/server.mjs`."""
+    parser = argparse.ArgumentParser(prog="pymonitor-host")
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the dashboard in a browser once the collector starts.",
+    )
+    args = parser.parse_args(sys.argv[1:] if argv is None else argv)
     try:
-        asyncio.run(_host())
+        asyncio.run(_host(no_browser=args.no_browser))
     except KeyboardInterrupt:
         pass
+    except RuntimeError as error:  # e.g. acquire_role: a collector already owns .local/
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 def client_main() -> None:
@@ -79,6 +99,9 @@ def client_main() -> None:
         asyncio.run(_client())
     except KeyboardInterrupt:
         pass
+    except RuntimeError as error:  # e.g. acquire_role: a watcher already owns .local/
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)
 
 
 def config_main() -> None:

@@ -17,7 +17,9 @@ port can be reviewed file-by-file against the original implementation:
   watcher.mjs         -> pymonitor/watcher.py
   server.mjs          -> pymonitor/server.py
   actions.mjs         -> pymonitor/actions.py
-  windows/tray.ps1    -> pymonitor/tray_native.py (native rewrite, not a wrapper)
+  windows/tray.ps1    -> pymonitor/console_bridge.py (console rewrite; an
+                          earlier native-tray rewrite, tray_native.py, was
+                          later replaced -- see docs/porting-notes.md)
 
 ``pymonitor/launcher.py`` has no ``.mjs`` equivalent: it is the testable
 start/stop/live-detection logic absorbed from the PowerShell-only

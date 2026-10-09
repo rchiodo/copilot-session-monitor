@@ -1,6 +1,6 @@
 # Copilot session monitor for Windows
 
-A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and receives native notifications. The collector automatically observes its own machine's Copilot sessions — no separate local watcher needed. A watcher is only required on each *additional* PC whose sessions you want to see on the collector's dashboard.
+A standalone, metadata-only monitor for Copilot work on **explicitly paired Windows PCs** on a shared LAN or existing private VPN. One collector PC shows the compact dashboard and prints completion notifications to its own console. The collector automatically observes its own machine's Copilot sessions — no separate local watcher needed. A watcher is only required on each *additional* PC whose sessions you want to see on the collector's dashboard.
 
 The multi-machine changes are currently a working-tree implementation; use this same version on every PC. A previously published version may support only one machine. There is no cloud relay, accounts, service installation, or automatic startup registration.
 
@@ -12,17 +12,17 @@ flowchart LR
     D["PC C: local Copilot + watcher"] -->|Authenticated HTTPS metadata| C
     A["PC A: local Copilot (self-observed in-process)"] -.->|No network, no watcher| C
     C --> W["Loopback webpage on PC A"]
-    C --> N["Windows notifications on PC A"]
+    C --> N["Console notifications on PC A"]
 ```
 
 - **Collector self-observation:** the collector polls its own machine's Copilot sessions directly in-process (the same cadence/logic as a watcher, reused internally) and feeds them into its own pipeline under a fixed, built-in local reporter identity. No separate watcher process, pairing step, or network hop is needed for the collector's own machine. Set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable this and go back to requiring an explicit local watcher instead.
-- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage or completion-notification tray, and needs no chat/model running. It does show a small tray icon with a **"Connect to host..."** menu for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
-- **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the notification tray — including a **"Generate connection request for a sub machine..."** menu item for pairing new watchers. It never opens a remote Copilot database or filesystem.
-- These are **two logical roles**, not a promise of two OS PIDs. Each role is a single Python process with an in-process native tray icon and menu (no separate PowerShell helper process). The watcher's tray supplies process/power evidence and the pairing dialog; the collector's tray supplies Windows theme, power events, notifications, and the connection-string generator.
+- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage, and needs no chat/model running. It runs attached to its console, with a **`connect`** command for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
+- **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the console command loop — including a **`generate`** command for pairing new watchers. It never opens a remote Copilot database or filesystem.
+- These are **two logical roles**, not a promise of two OS PIDs. Each role is a single Python process attached to its launching console (no tray icon, no separate PowerShell helper process, no detached background spawn). It prints directly to that terminal and accepts typed commands at a prompt; type `help` at any time for the current command list. The watcher's console loop supplies process/power evidence and the pairing command; the collector's console loop supplies Windows theme, power events, completion notifications (printed to the console), and the connection-string generator.
 
 ## Requirements
 
-- Windows 10/11; the collector needs an interactive Windows desktop for tray notifications.
+- Windows 10/11; each role runs attached to the console you start it from and stays in the foreground.
 - [`uv`](https://docs.astral.sh/uv/) on `PATH`, which manages the Python 3.11+ interpreter and dependencies automatically — **no separate `pip install` step is needed.** `uv run <script>.py` installs this project (editable) into an ephemeral virtual environment on first use.
 - Each watcher needs a supported local Copilot installation writing `%USERPROFILE%\.copilot`. The source adapter was verified against desktop 1.1.24 / CLI 1.0.90-0 and is undocumented/version-sensitive.
 - A current Edge/Chromium browser on the collector PC.
@@ -55,11 +55,11 @@ An existing single-machine installation from before this version migrates automa
 
 Use the same source version on each PC. Choose **one collector PC** with a stable private IP reachable through your LAN or existing VPN. The IP below is a synthetic example; replace it with an assigned IP on that PC. Wildcard/public binds are rejected. The collector PC's own sessions are already shown automatically (self-observation) — this section is only for adding *additional* PCs.
 
-### Recommended: tray + clipboard connection string
+### Recommended: console + clipboard connection string
 
-This is a Live-Share-style pairing flow: generate a one-time connection string on the collector PC, copy it to the clipboard, and paste it into the watcher's tray dialog on the other PC. There is no separate file to transfer.
+This is a Live-Share-style pairing flow: generate a one-time connection string on the collector PC, copy it to the clipboard, and paste it at the watcher's `connect` prompt on the other PC. There is no separate file to transfer.
 
-**On the collector PC**, stop the local roles, opt into a private interface, then start the tray app in host mode:
+**On the collector PC**, stop the local roles, opt into a private interface, then start the console app in host mode:
 
 ```powershell
 uv run stop-host.py
@@ -73,17 +73,17 @@ Not sure which IP to use? `uv run detect-lan-ip.py` picks the address this PC wo
 
 This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
 
-Right-click the collector's tray icon and choose **"Generate connection request for a sub machine..."**. Optionally type a label to identify the source PC (e.g. "Development laptop"), then OK. A connection string — prefixed `csm1:` — is copied to the clipboard and a confirmation toast appears. The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
+At the collector's console prompt, type `generate`. When prompted, optionally type a label to identify the source PC (e.g. "Development laptop"), then press Enter. A connection string — prefixed `csm1:` — is copied to the clipboard and printed as `Connection string copied to clipboard. Valid for pairing one machine. Paste it on the other PC using the "connect" command.` The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
 
-**On each remote Windows PC**, with the source checked out, start the tray app in its default child/watcher mode:
+**On each remote Windows PC**, with the source checked out, start the console app in its default child/watcher mode:
 
 ```powershell
 uv run start-tray.py
 ```
 
-Right-click its tray icon, choose **"Connect to host..."**, paste the connection string into the dialog, and click OK. The watcher validates the string (rejecting malformed or wrong-version input with a clear error dialog instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. A confirmation toast shows the host address and reporter label.
+At its console prompt, type `connect`, then paste the connection string when prompted and press Enter. The watcher validates the string (rejecting malformed or wrong-version input with a clear error message instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. It prints `Paired. Connected to <host> as <label>` on success.
 
-Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Native notifications appear **only on the collector PC**. To stop that source watcher, use its tray icon's **"Stop watcher"** item or:
+Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Completion notifications are printed **only to the collector's own console**. To stop that source watcher, type `stop` at its console prompt or:
 
 ```powershell
 uv run stop-client.py
@@ -95,16 +95,16 @@ No remote production connectivity is assumed just because local tests pass. Afte
 
 | Command | Role |
 | --- | --- |
-| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`, with a tray icon offering "Generate connection request...". |
-| `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`, with a tray icon offering "Connect to host...". |
+| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`; its console prompt offers `generate`/`recopy` for pairing. |
+| `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`; its console prompt offers `connect` for pairing. |
 | `uv run init-host.py` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
 | `uv run detect-lan-ip.py` | Detect this PC's LAN-reachable IP and apply it (no-op-safe: only reconfigures/rotates the certificate if the address or port actually changed). Add `--dry-run` to only print the detected address. |
 | `uv run start-host.py --lan` / `uv run start-tray.py --host --lan` | Automate stop + detect + reconfigure + start in one command. Add `--lan-port` for a non-default ingestion port. `--lan` is rejected without `--host` on `start-tray.py`. |
 | `uv run start-host.py --no-browser` | Start only the collector; no local Copilot installation is required. |
 | `uv run stop-host.py` | Stop only the collector; watchers will report unavailable and retry. |
-| `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; only a small tray icon for pairing. |
+| `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; just a console prompt for pairing (`connect`/`status`/`stop`). |
 
-The tray and webpage **Stop collector** control stops only the collector. Do not point one checkout's watcher at multiple collectors.
+Typing `stop` at the collector's console prompt (or the webpage's **Stop collector** control) stops only the collector. Do not point one checkout's watcher at multiple collectors.
 
 For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `python -m pymonitor.cli config local` plus `uv run start-client.py` pointed at loopback). For foreground diagnostics after configuration, `uv run start-host.py` runs the collector; `uv run start-client.py` runs the watcher. Stop foreground processes with Ctrl+C.
 
@@ -127,9 +127,9 @@ Revocation preserves retained metadata but makes that source unavailable. It doe
 
 ## Reading the dashboard
 
-The main page shows little beyond the two session columns: a header (title, family count, **Stop collector**), a status banner that is hidden whenever everything is healthy, and the columns themselves. Everything else — the Test notification button, source coverage, theme detection, the summary/guide text, the Windows notifications explainer, footer disclaimers, and the last-updated timestamp — lives in a collapsed **Details** section below the columns; expand it for that context, it is not needed for day-to-day monitoring.
+The main page shows little beyond the two session columns: a header (title, family count, **Stop collector**), a status banner that is hidden whenever everything is healthy, and the columns themselves. Everything else — the Test notification button, source coverage, theme detection, the summary/guide text, the notifications explainer, footer disclaimers, and the last-updated timestamp — lives in a collapsed **Details** section below the columns; expand it for that context, it is not needed for day-to-day monitoring.
 
-The status banner auto-appears only when there is something to act on: the collector is unhealthy or reports issues, or Windows notification delivery has failed. It stays hidden otherwise, including the ordinary "connected and nothing wrong" state — the two populated columns already imply health.
+The status banner auto-appears only when there is something to act on: the collector is unhealthy or reports issues, or notification delivery has failed. It stays hidden otherwise, including the ordinary "connected and nothing wrong" state — the two populated columns already imply health.
 
 Two compact columns show **Running** and **Finished / Needs input**. The latter also contains distinct **Error**, **Interrupted**, and **Unconfirmed** states; placement alone is not proof of completion.
 
@@ -151,7 +151,7 @@ The collector checks current report freshness and completed-run revision on each
 
 Completion alerts mean **the observed current family runs finished**, not that a task, tests, or PR succeeded. The collector requires continuous same-lease observation, working-run evidence, safe member states, and an explicit family finish notice. A silently omitted member, cleared foreground flag, or lack of output cannot finish a family.
 
-Use **Test notification** in the collector page/tray to check native delivery. Windows Focus / Do not disturb and notification policy can suppress tray balloons. Even Windows reporting "shown" is not proof that you saw a banner. The app never changes notification settings.
+Use **Test notification** in the collector page, or type `test` at the collector's console prompt, to confirm the notification pipeline is working. Notifications are printed to the collector's console (`[notification] <title>: <message>`), not shown as Windows toast popups, so there's nothing for OS Focus/Do-not-disturb settings to suppress — just make sure you can see that console window. The app never changes notification settings.
 
 ## Protocol and failure behavior
 
@@ -205,7 +205,7 @@ Standalone CLI coverage is **activity-only**: it tracks a bare `copilot` CLI pro
 pytest tests/ -q
 ```
 
-The Python test suite (`tests/`) covers the status engine, TLS pairing/protocol, lease/sequence/clock-skew handling, dismissal/dedupe, the native tray, and the new launcher scripts, using synthetic metadata and owned temporary directories. It exercises TLS/auth/schema/size rejection, namespace isolation, notifications, dismissal/resume, heartbeat loss, migration, restart, and dedupe. It never touches real Copilot data.
+The Python test suite (`tests/`) covers the status engine, TLS pairing/protocol, lease/sequence/clock-skew handling, dismissal/dedupe, the console bridge, and the launcher scripts, using synthetic metadata and owned temporary directories. It exercises TLS/auth/schema/size rejection, namespace isolation, notifications, dismissal/resume, heartbeat loss, migration, restart, and dedupe. It never touches real Copilot data.
 
 Two browser-rendering tools, used to visually validate `public/` UI changes without touching real Copilot data, remain for dev use. The fixture harness is now a Python port; the headless-Edge driver that automates it is still Node (it only drives a browser, it has no dependency on the old `.mjs` implementation):
 
