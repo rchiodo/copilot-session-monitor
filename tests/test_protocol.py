@@ -1,17 +1,19 @@
 """Tests for the Phase 2 wire-protocol additions in pymonitor.protocol.
 
-Covers envelope validation (validate_connect/validate_report), the Bearer
-auth check, private-address classification, and the csm1: connection-string
-codec round-trip -- the pure, network-independent pieces of protocol.py.
-`request()`/`read_json()` (the actual aiohttp client/server plumbing) are
-exercised indirectly via the collector/reporter integration tests once those
-modules land, per the phased plan.
+Covers envelope validation (validate_connect/validate_report), the bearer-auth check, private-address classification, and the csm1: connection-string
+codec round-trip -- the pure, network-independent pieces of protocol.py --
+plus real (non-mocked) TLS integration tests for request()'s cert-pin check
+at the bottom of the file.
 """
 from __future__ import annotations
 
 import datetime
+import hashlib
+import ipaddress
+import ssl
 
 import pytest
+from aiohttp import web
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -245,3 +247,98 @@ def test_validate_pairing_rejects_multiple_certificates() -> None:
     pairing = _valid_pairing(certificate=_self_signed_pem() + _self_signed_pem())
     with pytest.raises(proto.ProtocolError):
         proto.validate_pairing(pairing)
+
+
+# -- real (non-mocked) TLS integration tests for request()'s cert-pin check --
+#
+# The unit tests above exercise protocol.py's pure validation logic; nothing
+# in this file previously drove request() against an actual TLS connection.
+# That gap is exactly how the connection-release race (response.connection
+# going None before the post-hoc cert check ran, for small fully-buffered
+# JSON bodies -- see _PinCapturingConnector in protocol.py) shipped
+# undetected: every existing request()-adjacent test mocks it out. These
+# tests spin up a real aiohttp HTTPS listener instead.
+
+
+def _self_signed_cert_and_key() -> tuple[str, bytes]:
+    """Self-signed cert (PEM str) + matching private key (PEM bytes) with a
+    127.0.0.1 SAN, suitable for a real loopback TLS handshake."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "test-collector")])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - datetime.timedelta(days=1))
+        .not_valid_after(now + datetime.timedelta(days=1))
+        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    cert_pem = cert.public_bytes(serialization.Encoding.PEM).decode("ascii")
+    key_pem = key.private_bytes(
+        serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()
+    )
+    return cert_pem, key_pem
+
+
+async def _echo_ok(_request: web.Request) -> web.Response:
+    # Small, fully-buffered JSON body -- the exact shape that triggers aiohttp's
+    # synchronous connection-release-during-start() race this fix addresses.
+    return web.json_response({"ok": True})
+
+
+async def _start_tls_echo_server(tmp_path, cert_pem: str, key_pem: bytes) -> tuple[web.AppRunner, int]:
+    cert_path = tmp_path / "server-cert.pem"
+    key_path = tmp_path / "server-key.pem"
+    cert_path.write_text(cert_pem, encoding="ascii")
+    key_path.write_bytes(key_pem)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(str(cert_path), str(key_path))
+    app = web.Application()
+    app.router.add_post("/v1/report", _echo_ok)
+    runner = web.AppRunner(app, shutdown_timeout=2.0)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=ssl_context)
+    await site.start()
+    port = runner.addresses[0][1]
+    return runner, port
+
+
+def _pairing_for(cert_pem: str, port: int) -> dict:
+    return {
+        "version": proto.VERSION,
+        "reporterId": _uuid(1),
+        "label": "test",
+        "collectorUrl": f"https://127.0.0.1:{port}/",
+        "token": hashlib.sha256(b"shh").hexdigest(),
+        "certificate": cert_pem,
+    }
+
+
+async def test_request_succeeds_against_real_tls_server_with_matching_pin(tmp_path) -> None:
+    """Regression test for the connection-release race: a real (non-mocked) TLS
+    server returning a small, fully-buffered JSON body must not trip a false
+    pin mismatch (the exact bug this fix addresses)."""
+    cert_pem, key_pem = _self_signed_cert_and_key()
+    runner, port = await _start_tls_echo_server(tmp_path, cert_pem, key_pem)
+    try:
+        result = await proto.request(_pairing_for(cert_pem, port), "v1/report", {"kind": "finished"})
+        assert result == {"ok": True}
+    finally:
+        await runner.cleanup()
+
+
+async def test_request_rejects_real_tls_server_with_different_cert(tmp_path) -> None:
+    """A real TLS server presenting a cert other than the pinned one must still be
+    rejected -- proving the connector-based fix didn't neuter the pin check."""
+    server_cert_pem, key_pem = _self_signed_cert_and_key()
+    other_cert_pem, _unused_key = _self_signed_cert_and_key()
+    runner, port = await _start_tls_echo_server(tmp_path, server_cert_pem, key_pem)
+    try:
+        with pytest.raises(proto.ProtocolError):
+            await proto.request(_pairing_for(other_cert_pem, port), "v1/report", {"kind": "finished"})
+    finally:
+        await runner.cleanup()

@@ -366,11 +366,31 @@ def decode_connection_string(value: Any) -> dict[str, Any]:
     return validate_pairing(parsed)
 
 
-def _peer_certificate_der(response: "aiohttp.ClientResponse") -> bytes | None:
-    connection = response.connection
-    transport = connection.transport if connection else None
-    ssl_object = transport.get_extra_info("ssl_object") if transport else None
-    return ssl_object.getpeercert(binary_form=True) if ssl_object else None
+class _PinCapturingConnector(aiohttp.TCPConnector):
+    """TCPConnector that stashes the peer cert as the TLS connection is made.
+
+    aiohttp releases a response's connection (response.connection -> None)
+    as soon as its body is fully buffered, which for small JSON replies can
+    happen before start() even returns to request() below -- so reading the
+    peer certificate off response.connection afterwards is a race that loses
+    in practice (see the bug this fixed: the pin check reporting "server
+    presented none" against a server that really did present the pinned
+    cert). Capturing it here, at connection-creation time, is race-free: one
+    of these connectors is used for exactly one request (request() below
+    creates a fresh session/connector per call), so there's no risk of a
+    later connection's cert overwriting an earlier one before it's read.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.captured_peer_der: bytes | None = None
+
+    async def _wrap_create_connection(self, *args: Any, **kwargs: Any) -> Any:
+        transport, protocol = await super()._wrap_create_connection(*args, **kwargs)
+        ssl_object = transport.get_extra_info("ssl_object")
+        if ssl_object is not None:
+            self.captured_peer_der = ssl_object.getpeercert(binary_form=True)
+        return transport, protocol
 
 
 async def _read_capped(content: "aiohttp.StreamReader", cap: int, message: str) -> bytes:
@@ -409,10 +429,11 @@ async def request(pairing: dict[str, Any], route: str, body: dict[str, Any]) -> 
         "Authorization": f"Bearer {pairing['token']}",
     }
     timeout = aiohttp.ClientTimeout(total=4)
+    connector = _PinCapturingConnector(ssl=ssl_context)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with aiohttp.ClientSession(timeout=timeout, connector=connector) as session:
             async with session.post(url, data=data.encode("utf-8"), headers=headers, ssl=ssl_context) as response:
-                peer_der = _peer_certificate_der(response)
+                peer_der = connector.captured_peer_der
                 if peer_der is None or peer_der != expected_der:
                     expected_fp = _der_fingerprint_sha256(expected_der)
                     peer_fp = _der_fingerprint_sha256(peer_der) if peer_der is not None else "none"
