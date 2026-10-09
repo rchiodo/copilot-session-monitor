@@ -16,9 +16,9 @@ flowchart LR
 ```
 
 - **Collector self-observation:** the collector polls its own machine's Copilot sessions directly in-process (the same cadence/logic as a watcher, reused internally) and feeds them into its own pipeline under a fixed, built-in local reporter identity. No separate watcher process, pairing step, or network hop is needed for the collector's own machine. Set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable this and go back to requiring an explicit local watcher instead.
-- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage, and needs no chat/model running. It runs attached to its console, with a **`connect`** command for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
-- **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the console command loop — including a **`generate`** command for pairing new watchers. It never opens a remote Copilot database or filesystem.
-- These are **two logical roles**, not a promise of two OS PIDs. Each role is a single Python process attached to its launching console (no tray icon, no separate PowerShell helper process, no detached background spawn). It prints directly to that terminal and accepts typed commands at a prompt; type `help` at any time for the current command list. The watcher's console loop supplies process/power evidence and the pairing command; the collector's console loop supplies Windows theme, power events, completion notifications (printed to the console), and the connection-string generator.
+- **Watcher:** reads only its own machine's Copilot metadata/events and process evidence. It reduces lifecycle, attached background work, and canonical parent/child relationships, then posts bounded metadata. It has no dashboard webpage, and needs no chat/model running. It runs attached to its console, with a **`Connect to host`** menu option for pairing (see below). Use a watcher only for *other* machines — not the collector's own, which is self-observed automatically.
+- **Collector:** receives reports, retains machine-scoped families, owns dismissal and notification dedupe, serves the dashboard, and runs the console menu loop — including a **`Generate connection request`** option for pairing new watchers. It never opens a remote Copilot database or filesystem.
+- These are **two logical roles**, not a promise of two OS PIDs. Each role is a single Python process attached to its launching console (no tray icon, no separate PowerShell helper process, no detached background spawn). It prints a numbered menu directly to that terminal and accepts a single digit at the `Choose a number:` prompt; type `?` to reprint the menu. The watcher's console menu supplies process/power evidence and the pairing option; the collector's console menu supplies Windows theme, power events, completion notifications (printed to the console), and the connection-string generator.
 
 ## Requirements
 
@@ -57,7 +57,7 @@ Use the same source version on each PC. Choose **one collector PC** with a stabl
 
 ### Recommended: console + clipboard connection string
 
-This is a Live-Share-style pairing flow: generate a one-time connection string on the collector PC, copy it to the clipboard, and paste it at the watcher's `connect` prompt on the other PC. There is no separate file to transfer.
+This is a Live-Share-style pairing flow: generate a one-time connection string on the collector PC, copy it to the clipboard, and paste it at the watcher's **`Connect to host`** menu option on the other PC. There is no separate file to transfer.
 
 **On the collector PC**, stop the local roles, opt into a private interface, then start the console app in host mode:
 
@@ -73,7 +73,7 @@ Not sure which IP to use? `uv run detect-lan-ip.py` picks the address this PC wo
 
 This adds an HTTPS **ingestion-only** listener on the selected IP. Local ingestion stays available on loopback. The webpage and its controls still bind only to `127.0.0.1:43187`; they are not exposed to the LAN.
 
-At the collector's console prompt, type `generate`. When prompted, optionally type a label to identify the source PC (e.g. "Development laptop"), then press Enter. A connection string — prefixed `csm1:` — is copied to the clipboard and printed as `Connection string copied to clipboard. Valid for pairing one machine. Paste it on the other PC using the "connect" command.` The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
+At the collector's console, you'll see a numbered menu; type `3` for **Generate connection request** and press Enter. When prompted, optionally type a label to identify the source PC (e.g. "Development laptop"), then press Enter. A connection string — prefixed `csm1:` — is copied to the clipboard and printed as `Connection string copied to clipboard. Valid for pairing one machine. Paste it on the other PC using the "Connect to host" option.` The string is a compact, opaque, base64-encoded bundle containing the collector's reachable IP/port (not loopback), a fresh write-only bearer credential, and the collector's certificate fingerprint; it is valid for pairing exactly one machine. Treat it like a credential: don't paste it into chat, a browser, source control, or a public channel. Generate a separate string for each source PC, even if their hostnames are identical.
 
 **On each remote Windows PC**, with the source checked out, start the console app in its default child/watcher mode:
 
@@ -81,9 +81,9 @@ At the collector's console prompt, type `generate`. When prompted, optionally ty
 uv run start-tray.py
 ```
 
-At its console prompt, type `connect`, then paste the connection string when prompted and press Enter. The watcher validates the string (rejecting malformed or wrong-version input with a clear error message instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. It prints `Paired. Connected to <host> as <label>` on success.
+At its console menu, type `1` for **Connect to host**, then paste the connection string when prompted and press Enter. The watcher validates the string (rejecting malformed or wrong-version input with a clear error message instead of failing silently), pins the collector's certificate, stores the pairing under `.local`, and immediately begins the normal watcher reporting cadence — no separate "start reporting" step. It prints `Paired. Connected to <host> as <label>` on success.
 
-Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Completion notifications are printed **only to the collector's own console**. To stop that source watcher, type `stop` at its console prompt or:
+Check **paired source coverage** on the collector dashboard for its label, short unique identity, connection state, and last-received time. Completion notifications are printed **only to the collector's own console**. To stop that source watcher, type `3` for **Stop** at its console menu or:
 
 ```powershell
 uv run stop-client.py
@@ -95,16 +95,16 @@ No remote production connectivity is assumed just because local tests pass. Afte
 
 | Command | Role |
 | --- | --- |
-| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`; its console prompt offers `generate`/`recopy` for pairing. |
-| `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`; its console prompt offers `connect` for pairing. |
+| `uv run start-tray.py --host` | Recommended host entry point: identical to `start-host.py`; its console menu offers numbered **Generate connection request**/**Recopy connection string** options for pairing. |
+| `uv run start-tray.py` (no flags) | Recommended child entry point: identical to `start-client.py`; its console menu offers a numbered **Connect to host** option for pairing. |
 | `uv run init-host.py` | Prepare collector config/certificate, loopback-only unless a private IP is explicitly selected. |
 | `uv run detect-lan-ip.py` | Detect this PC's LAN-reachable IP and apply it (no-op-safe: only reconfigures/rotates the certificate if the address or port actually changed). Add `--dry-run` to only print the detected address. |
 | `uv run start-host.py --lan` / `uv run start-tray.py --host --lan` | Automate stop + detect + reconfigure + start in one command. Add `--lan-port` for a non-default ingestion port. `--lan` is rejected without `--host` on `start-tray.py`. |
 | `uv run start-host.py --no-browser` | Start only the collector; no local Copilot installation is required. |
 | `uv run stop-host.py` | Stop only the collector; watchers will report unavailable and retry. |
-| `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; just a console prompt for pairing (`connect`/`status`/`stop`). |
+| `uv run start-client.py` / `uv run stop-client.py` | Start/stop an already paired watcher. No dashboard webpage or completion notifications; just a console menu for pairing (**Connect to host**/**Status**/**Stop**). |
 
-Typing `stop` at the collector's console prompt (or the webpage's **Stop collector** control) stops only the collector. Do not point one checkout's watcher at multiple collectors.
+Choosing **Stop** at the collector's console menu (or the webpage's **Stop collector** control) stops only the collector. Do not point one checkout's watcher at multiple collectors.
 
 For a different dashboard port, set `$env:MONITOR_PORT = '43189'` before starting the collector. The dashboard port must differ from the HTTPS ingestion port. Self-observation is on by default; set `$env:MONITOR_SELF_OBSERVE = '0'` before starting the collector to disable it if you prefer running an explicit separate local watcher instead (e.g. `python -m pymonitor.cli config local` plus `uv run start-client.py` pointed at loopback). For foreground diagnostics after configuration, `uv run start-host.py` runs the collector; `uv run start-client.py` runs the watcher. Stop foreground processes with Ctrl+C.
 
@@ -151,7 +151,7 @@ The collector checks current report freshness and completed-run revision on each
 
 Completion alerts mean **the observed current family runs finished**, not that a task, tests, or PR succeeded. The collector requires continuous same-lease observation, working-run evidence, safe member states, and an explicit family finish notice. A silently omitted member, cleared foreground flag, or lack of output cannot finish a family.
 
-Use **Test notification** in the collector page, or type `test` at the collector's console prompt, to confirm the notification pipeline is working. Notifications are printed to the collector's console (`[notification] <title>: <message>`), not shown as Windows toast popups, so there's nothing for OS Focus/Do-not-disturb settings to suppress — just make sure you can see that console window. The app never changes notification settings.
+Use **Test notification** in the collector page, or type `2` for **Test notification** at the collector's console menu, to confirm the notification pipeline is working. Notifications are printed to the collector's console (`[notification] <title>: <message>`), not shown as Windows toast popups, so there's nothing for OS Focus/Do-not-disturb settings to suppress — just make sure you can see that console window. The app never changes notification settings.
 
 ## Protocol and failure behavior
 

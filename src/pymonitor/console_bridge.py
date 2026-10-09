@@ -209,7 +209,7 @@ class CollectorConsoleBridge:
         self._power.start()
         print("Copilot session monitor - collector")
         print(f"Dashboard: {self._server.url}")
-        self._print_help()
+        self._print_menu()
         self._console_thread = threading.Thread(
             target=self._console_loop, daemon=True, name="pymonitor-collector-console"
         )
@@ -218,35 +218,48 @@ class CollectorConsoleBridge:
 
     # -- console command loop (runs on a dedicated background thread) -----
 
-    def _print_help(self) -> None:
-        print(
-            "Commands: help | open (dashboard) | test (notification) | "
-            "generate (connection request) | recopy (connection string) | stop"
-        )
+    def _print_menu(self) -> None:
+        print()
+        print("What would you like to do?")
+        print()
+        print("1. Open dashboard")
+        print("2. Test notification")
+        print("3. Generate connection request")
+        print("4. Recopy connection string")
+        print("5. Stop")
+        print()
 
     def _console_loop(self) -> None:
         while True:
             try:
-                line = input().strip().lower()
+                line = input("Choose a number: ").strip()
             except (EOFError, OSError):
                 return
             if not line:
                 continue
             if line in ("help", "?"):
-                self._print_help()
-            elif line == "open":
+                self._print_menu()
+                continue
+            try:
+                choice = int(line)
+            except ValueError:
+                print(f"Unknown option: {line!r}. Enter a number from the menu above.")
+                continue
+            if choice == 1:
                 self._cmd_open()
-            elif line == "test":
+            elif choice == 2:
                 self._cmd_test()
-            elif line == "generate":
+            elif choice == 3:
                 self._cmd_generate()
-            elif line == "recopy":
+            elif choice == 4:
                 self._cmd_recopy()
-            elif line in ("stop", "quit", "exit"):
+            elif choice == 5:
                 self._cmd_stop()
                 return
             else:
-                print(f"Unknown command: {line!r}. Type 'help' for a list of commands.")
+                print(f"Unknown option: {choice}. Enter a number from the menu above.")
+                continue
+            self._print_menu()
 
     def _cmd_open(self) -> None:
         webbrowser.open(self._server.url)
@@ -306,7 +319,7 @@ class CollectorConsoleBridge:
         _copy_to_clipboard(value)
         print(
             'Connection string copied to clipboard. Valid for pairing one machine. '
-            'Paste it on the other PC using the "connect" command.'
+            "Paste it on the other PC using the 'Connect to host' option."
         )
 
     async def _recopy_connection(self, reporter_id: str, label: str) -> None:
@@ -318,7 +331,7 @@ class CollectorConsoleBridge:
             print(f"Recopy connection string failed ({type(error).__name__})")
             return
         _copy_to_clipboard(value)
-        print(f'Connection string for {label} copied to clipboard. Paste it on that machine using "connect".')
+        print(f"Connection string for {label} copied to clipboard. Paste it on that machine using 'Connect to host'.")
 
     # -- polling/power callbacks (run on background poll/power threads) ---
 
@@ -399,7 +412,7 @@ class WatcherConsoleBridge:
         self._power = _PowerEventWindow(self._on_power)
         self._power.start()
         print("Copilot session monitor - watcher")
-        self._print_help()
+        self._print_menu()
         self._console_thread = threading.Thread(
             target=self._console_loop, daemon=True, name="pymonitor-watcher-console"
         )
@@ -407,28 +420,42 @@ class WatcherConsoleBridge:
 
     # -- console command loop (runs on a dedicated background thread) -----
 
-    def _print_help(self) -> None:
-        print("Commands: help | connect (to host) | status | stop")
+    def _print_menu(self) -> None:
+        print()
+        print("What would you like to do?")
+        print()
+        print("1. Connect to host")
+        print("2. Status")
+        print("3. Stop")
+        print()
 
     def _console_loop(self) -> None:
         while True:
             try:
-                line = input().strip().lower()
+                line = input("Choose a number: ").strip()
             except (EOFError, OSError):
                 return
             if not line:
                 continue
             if line in ("help", "?"):
-                self._print_help()
-            elif line == "connect":
+                self._print_menu()
+                continue
+            try:
+                choice = int(line)
+            except ValueError:
+                print(f"Unknown option: {line!r}. Enter a number from the menu above.")
+                continue
+            if choice == 1:
                 self._cmd_connect()
-            elif line == "status":
+            elif choice == 2:
                 self._cmd_status()
-            elif line in ("stop", "quit", "exit"):
+            elif choice == 3:
                 self._cmd_stop()
                 return
             else:
-                print(f"Unknown command: {line!r}. Type 'help' for a list of commands.")
+                print(f"Unknown option: {choice}. Enter a number from the menu above.")
+                continue
+            self._print_menu()
 
     def _cmd_connect(self) -> None:
         value = input("Paste the connection string copied from the host machine: ").strip()
@@ -441,7 +468,7 @@ class WatcherConsoleBridge:
 
     def _cmd_status(self) -> None:
         if not self._watcher.pairing:
-            print("Not paired yet. Use the 'connect' command to pair with a host.")
+            print("Not paired yet. Use the 'Connect to host' option to pair with a host.")
             return
         health = self._watcher.health
         print(

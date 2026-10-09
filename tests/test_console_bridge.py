@@ -288,8 +288,8 @@ async def test_collector_bridge_console_loop_dispatches_known_commands(monkeypat
     calls: list[str] = []
     monkeypatch.setattr(bridge, "_cmd_open", lambda: calls.append("open"))
     monkeypatch.setattr(bridge, "_cmd_test", lambda: calls.append("test"))
-    lines = iter(["open", "TEST", "  ", "stop"])
-    monkeypatch.setattr(cb, "input", lambda: next(lines), raising=False)
+    lines = iter(["1", "2", "  ", "5"])
+    monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: calls.append("stop"))
     bridge._console_loop()
     assert calls == ["open", "test", "stop"]
@@ -301,11 +301,11 @@ async def test_collector_bridge_console_loop_unknown_command_prints_message(
     server = _fake_server()
     bridge = CollectorConsoleBridge(server, asyncio.Event())
     await bridge.start()
-    lines = iter(["bogus", "stop"])
-    monkeypatch.setattr(cb, "input", lambda: next(lines), raising=False)
+    lines = iter(["bogus", "5"])
+    monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: None)
     bridge._console_loop()
-    assert "Unknown command: 'bogus'" in capsys.readouterr().out
+    assert "Unknown option: 'bogus'" in capsys.readouterr().out
 
 
 async def test_collector_bridge_push_theme_and_push_processes_marshal_onto_loop() -> None:
