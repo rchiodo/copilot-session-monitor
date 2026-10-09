@@ -85,6 +85,7 @@ class Watcher:
     # -- lifecycle -----------------------------------------------------
 
     async def start(self) -> None:
+        data_dir.mkdir(parents=True, exist_ok=True)
         self._release = await acquire_role(data_dir, "watcher")
         self.pairing = await optional_config("watcher.json")
         saved_identity = await optional_config("watcher-identity.json")

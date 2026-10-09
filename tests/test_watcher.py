@@ -81,9 +81,10 @@ def _isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     # (`from .configuration import data_dir`) so it needs its own patch too.
     monkeypatch.setattr(cfg, "data_dir", data_dir)
     monkeypatch.setattr(watcher_mod, "data_dir", data_dir)
-    # watcher.py's start()/acquire_role() assume the directory already exists
-    # (real entrypoints create it via configuration.initialize()/_protect_data
-    # before a Watcher is ever constructed).
+    # Watcher.start() creates this itself (mirroring CollectorServer.start()),
+    # but most tests below don't exercise start() at all (they patch
+    # cfg.data_dir directly for read/write helpers), so pre-create it here
+    # too for those.
     data_dir.mkdir(parents=True, exist_ok=True)
     return data_dir
 
@@ -116,6 +117,24 @@ async def _started(tmp_path: Path) -> Watcher:
     w = Watcher()
     await w.start()
     return w
+
+
+async def test_start_creates_missing_data_dir(tmp_path: Path) -> None:
+    """Regression test: a fresh checkout has no `.local` directory yet, and
+    acquire_role() (unlike CollectorServer.start()) never creates it -- it
+    only opens a lock *file* inside the directory, raising FileNotFoundError
+    if the directory itself is missing. Watcher.start() must create the
+    directory itself before acquiring the role, the same way
+    CollectorServer.start() already does."""
+    import shutil
+
+    shutil.rmtree(cfg.data_dir)
+    assert not cfg.data_dir.exists()
+    w = await _started(tmp_path)
+    try:
+        assert cfg.data_dir.exists()
+    finally:
+        await w.stop()
 
 
 async def test_identity_is_generated_fresh_on_first_start(tmp_path: Path) -> None:
