@@ -442,7 +442,17 @@ async def request(pairing: dict[str, Any], route: str, body: dict[str, Any]) -> 
                     )
                 content = await _read_capped(response.content, 65536, "Collector response too large")
                 if response.status != 200:
-                    raise fail(f"Collector rejected request ({response.status})", response.status)
+                    reason = None
+                    try:
+                        parsed_error = json.loads(content.decode("utf-8"))
+                        if isinstance(parsed_error, dict) and isinstance(parsed_error.get("error"), str):
+                            reason = parsed_error["error"]
+                    except Exception:
+                        pass
+                    message = f"Collector rejected request ({response.status})"
+                    if reason:
+                        message = f"{message}: {reason}"
+                    raise fail(message, response.status)
                 try:
                     return json.loads(content.decode("utf-8"))
                 except Exception as error:

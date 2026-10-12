@@ -290,7 +290,13 @@ async def _echo_ok(_request: web.Request) -> web.Response:
     return web.json_response({"ok": True})
 
 
-async def _start_tls_echo_server(tmp_path, cert_pem: str, key_pem: bytes) -> tuple[web.AppRunner, int]:
+async def _echo_conflict(_request: web.Request) -> web.Response:
+    # Mirrors collector.py's `fail()` responses: a non-200 status with a JSON
+    # body carrying the specific reason (see collector.py's `connect()`/`accept()`).
+    return web.json_response({"error": "Another watcher instance holds this identity"}, status=409)
+
+
+async def _start_tls_server(tmp_path, cert_pem: str, key_pem: bytes, handler) -> tuple[web.AppRunner, int]:
     cert_path = tmp_path / "server-cert.pem"
     key_path = tmp_path / "server-key.pem"
     cert_path.write_text(cert_pem, encoding="ascii")
@@ -298,13 +304,17 @@ async def _start_tls_echo_server(tmp_path, cert_pem: str, key_pem: bytes) -> tup
     ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ssl_context.load_cert_chain(str(cert_path), str(key_path))
     app = web.Application()
-    app.router.add_post("/v1/report", _echo_ok)
+    app.router.add_post("/v1/report", handler)
     runner = web.AppRunner(app, shutdown_timeout=2.0)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=ssl_context)
     await site.start()
     port = runner.addresses[0][1]
     return runner, port
+
+
+async def _start_tls_echo_server(tmp_path, cert_pem: str, key_pem: bytes) -> tuple[web.AppRunner, int]:
+    return await _start_tls_server(tmp_path, cert_pem, key_pem, _echo_ok)
 
 
 def _pairing_for(cert_pem: str, port: int) -> dict:
@@ -327,6 +337,20 @@ async def test_request_succeeds_against_real_tls_server_with_matching_pin(tmp_pa
     try:
         result = await proto.request(_pairing_for(cert_pem, port), "v1/report", {"kind": "finished"})
         assert result == {"ok": True}
+    finally:
+        await runner.cleanup()
+
+
+async def test_request_surfaces_collector_error_reason_on_409(tmp_path) -> None:
+    """The client must not swallow the collector's specific `fail()` reason:
+    the raised ProtocolError message should include it, not just the bare
+    status code (otherwise users only ever see "Collector rejected request
+    (409)" with no way to tell which of several possible causes fired)."""
+    cert_pem, key_pem = _self_signed_cert_and_key()
+    runner, port = await _start_tls_server(tmp_path, cert_pem, key_pem, _echo_conflict)
+    try:
+        with pytest.raises(proto.ProtocolError, match="Another watcher instance holds this identity"):
+            await proto.request(_pairing_for(cert_pem, port), "v1/report", {"kind": "finished"})
     finally:
         await runner.cleanup()
 
