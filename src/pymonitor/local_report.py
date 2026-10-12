@@ -83,6 +83,12 @@ async def poll_local(ctx: dict[str, Any], forced_gap_reason: str | None = None) 
         result = await monitor.update(observed["samples"], {"relatives": observed["relatives"]})
         issues = observed["issues"]
         healthy = not result["gap"]
+        if not healthy and not issues and result.get("detail"):
+            # engine.py's gap detector can fire with zero per-session issues
+            # (source.poll() succeeded; the *interval* between update() calls
+            # was just too long -- see GAP_THRESHOLD_MS). Without this, the
+            # caller would otherwise see an empty issue string.
+            issues = [result["detail"]]
         source.consecutive_failures = 0
         for id_ in monitor.rows.keys():
             source.tracked.add(id_)

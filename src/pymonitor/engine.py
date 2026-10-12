@@ -254,6 +254,18 @@ class SessionStore:
 
 EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
+# Local-observation gap tolerance, in milliseconds. This measures wall-clock
+# time between successive update() calls, which span a *full* poll() cycle
+# upstream (watcher.py) -- including network I/O, not just the local
+# observation step. reporter.send() can retry once on a 409/503 (optionally
+# via a fresh connect()), and watcher.py's poll() can pre-emptively
+# reconnect() too; each HTTP call is bounded by protocol.py's own ~4s
+# ClientTimeout, so chaining a couple of those within one cycle can approach
+# ~12-16s even when nothing is actually broken (e.g. transient network
+# flakiness, not a real stall/sleep). Keep real margin above that worst case
+# so transient network retries don't masquerade as a local observation gap.
+GAP_THRESHOLD_MS = 25000
+
 
 class MonitorEngine:
     """Mirrors engine.mjs's MonitorEngine class -- the per-machine status state machine."""
@@ -277,13 +289,14 @@ class MonitorEngine:
         self.last_poll: float | None = None
         self.baseline = True
 
-    def snapshot(self, gap: bool = False) -> dict[str, Any]:
+    def snapshot(self, gap: bool = False, detail: str | None = None) -> dict[str, Any]:
         sessions = sort_sessions(self.rows.values())
         return {
             "sessions": sessions,
             "active": [row for row in sessions if row["state"] == "working"],
             "attention": [row for row in sessions if row["state"] in ("waiting", "error", "unknown")],
             "gap": gap,
+            "detail": detail,
         }
 
     async def update(
@@ -297,10 +310,10 @@ class MonitorEngine:
         import time
 
         now = time.time() * 1000 if now is None else now
-        gap = self.last_poll is not None and (now - self.last_poll > 15000 or now < self.last_poll)
+        gap = self.last_poll is not None and (now - self.last_poll > GAP_THRESHOLD_MS or now < self.last_poll)
         self.last_poll = now
         if not healthy or gap:
-            detail = "Observation gap (sleep or pause)" if gap else reason
+            detail = "Observation gap (sleep, pause, or slow network)" if gap else reason
             self.rows = {
                 row["id"]: row for row in unavailable_sessions(list(self.rows.values()), detail)
             }
@@ -316,7 +329,7 @@ class MonitorEngine:
                 )
             self.observed.clear()
             self.baseline = True
-            return self.snapshot(gap)
+            return self.snapshot(gap, detail=detail)
 
         present: set[str] = set()
         for sample in samples:

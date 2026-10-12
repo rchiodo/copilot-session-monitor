@@ -210,7 +210,12 @@ class Watcher:
         async def _loop() -> None:
             while True:
                 await asyncio.sleep(POLL_INTERVAL_SECONDS)
-                await self.poll()
+                try:
+                    await self.poll()
+                except Exception as error:  # noqa: BLE001 - the polling loop must never die silently (e.g. a future
+                    # bridge.on_health_changed() implementation raising, which sits outside poll()'s own
+                    # try/except); log and retry on the next tick instead of leaving the watcher stuck forever.
+                    print(f"Watcher poll loop error ({type(error).__name__}): {error}")
 
         self._timer_task = asyncio.ensure_future(_loop())
         await self.poll()

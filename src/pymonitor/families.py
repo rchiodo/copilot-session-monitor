@@ -244,7 +244,7 @@ class FamilyMonitor:
     def observed(self) -> dict[str, dict[str, Any]]:
         return self.engine.observed
 
-    def snapshot(self, gap: bool = False) -> dict[str, Any]:
+    def snapshot(self, gap: bool = False, detail: str | None = None) -> dict[str, Any]:
         members = sort_sessions(list(self.rows.values()))
         sessions = [
             row
@@ -258,6 +258,7 @@ class FamilyMonitor:
             "active": [row for row in sessions if row["state"] == "working"],
             "attention": [row for row in sessions if row["state"] in ("waiting", "error", "unknown")],
             "gap": gap,
+            "detail": detail,
         }
 
     def dismiss(self, entries: list[dict[str, Any]]) -> dict[str, list[Any]]:
@@ -380,4 +381,4 @@ class FamilyMonitor:
             if id_ not in ids:
                 del self.dismissed[id_]
 
-        return self.snapshot(result.get("gap"))
+        return self.snapshot(result.get("gap"), detail=result.get("detail"))

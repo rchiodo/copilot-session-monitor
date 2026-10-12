@@ -302,9 +302,14 @@ class CollectorServer:
                 await asyncio.sleep(1.5)
                 if self.stopping:
                     return
-                await self.actions.run(self._refresh_tick)
-                await self._local_poll()
-                await self._broadcast_status()
+                try:
+                    await self.actions.run(self._refresh_tick)
+                    await self._local_poll()
+                    await self._broadcast_status()
+                except Exception as error:  # noqa: BLE001 - this loop must never die silently; log and retry
+                    # on the next tick instead of leaving the collector's self-observation/broadcast stuck
+                    # forever (see the matching hardening in watcher.py's _loop()).
+                    print(f"Collector poll loop error ({type(error).__name__}): {error}")
 
         self._timer_task = asyncio.ensure_future(_loop())
         await self._local_poll()
