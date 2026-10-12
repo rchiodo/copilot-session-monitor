@@ -46,6 +46,7 @@ byte-for-byte traceable logic, not idiomatic Python.
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import json
 import re
@@ -236,6 +237,13 @@ class Collector:
             for source in self.sources.values()
         ]
         payload = {"version": 1, "sources": sources, "dismissed": [[id_, key] for id_, key in self.dismissed.items()]}
+        # Called on every successful /v1/connect and /v1/report while the
+        # collector's shared async lock is held for all concurrent
+        # reporters, so a blocking write here stalls every other socket's
+        # turn too. Offload to a thread so the event loop stays responsive.
+        await asyncio.to_thread(self._save_sync, payload)
+
+    def _save_sync(self, payload: dict[str, Any]) -> None:
         tmp = Path(f"{self.file}.tmp")
         tmp.write_text(json.dumps(payload), encoding="utf-8")
         try:

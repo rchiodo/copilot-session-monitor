@@ -246,8 +246,17 @@ def _fingerprint_sha256(pem_or_der: bytes) -> str:
     return ":".join(f"{byte:02X}" for byte in raw)
 
 
-async def read_config(file: str) -> Any:
+def _read_config_sync(file: str) -> Any:
     return json.loads((data_dir / file).read_text(encoding="utf-8"))
+
+
+async def read_config(file: str) -> Any:
+    # Called on every reporter connect/report/disconnect via
+    # _refresh_configuration(), while the collector's single async lock is
+    # held for all concurrent reporters -- so a blocking read here stalls
+    # the whole event loop, not just this coroutine's turn. Offload to a
+    # thread so other sockets keep making progress while disk I/O happens.
+    return await asyncio.to_thread(_read_config_sync, file)
 
 
 async def optional_config(file: str) -> Any | None:
@@ -257,7 +266,7 @@ async def optional_config(file: str) -> Any | None:
         return None
 
 
-async def save_config(file: str, value: Any) -> None:
+def _save_config_sync(file: str, value: Any) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     target = data_dir / file
     tmp = Path(f"{target}.tmp")
@@ -267,6 +276,12 @@ async def save_config(file: str, value: Any) -> None:
     except OSError:
         pass
     tmp.replace(target)
+
+
+async def save_config(file: str, value: Any) -> None:
+    # Same reasoning as read_config: this runs under the shared lock on the
+    # connect/report hot path, so keep it off the event loop thread.
+    await asyncio.to_thread(_save_config_sync, file, value)
 
 
 def validate_collector(config: dict[str, Any]) -> dict[str, Any]:

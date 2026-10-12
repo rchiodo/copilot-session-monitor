@@ -31,6 +31,7 @@ the goal is byte-for-byte traceable logic, not idiomatic Python.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -165,10 +166,17 @@ class Ledger:
     def __init__(self, file: str) -> None:
         self.file = file
         self.keys: set[str] = set()
+        # Node's version is naturally serialized by synchronous fs calls
+        # with no await in between; now that the write below runs in a
+        # worker thread, concurrent claim_digest() calls could otherwise
+        # race on self.keys (lost update) and on the shared .tmp path. This
+        # lock reproduces the original claim-at-most-once guarantee while
+        # still keeping actual disk I/O off the event loop thread.
+        self._lock = asyncio.Lock()
 
     async def load(self) -> None:
         try:
-            data = json.loads(Path(self.file).read_text(encoding="utf-8"))
+            data = json.loads(await asyncio.to_thread(Path(self.file).read_text, encoding="utf-8"))
         except FileNotFoundError:
             return
         keys = data.get("keys")
@@ -187,16 +195,23 @@ class Ledger:
         return await self._claim_once(hash_)
 
     async def _claim_once(self, hash_: str) -> bool:
-        if hash_ in self.keys:
-            return False
-        keys = (list(self.keys) + [hash_])[-4096:]
+        async with self._lock:
+            if hash_ in self.keys:
+                return False
+            keys = (list(self.keys) + [hash_])[-4096:]
+            # Reached from the collector's notify() on the same shared-lock
+            # hot path as save()/read_config() below -- keep the write off
+            # the event loop thread for the same reason.
+            await asyncio.to_thread(self._write_sync, keys)
+            self.keys = set(keys)
+            return True
+
+    def _write_sync(self, keys: list[str]) -> None:
         path = Path(self.file)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path(f"{self.file}.tmp")
         tmp.write_text(json.dumps({"version": 1, "keys": keys}), encoding="utf-8")
         os.replace(tmp, path)
-        self.keys = set(keys)
-        return True
 
 
 class SessionStore:
@@ -206,6 +221,10 @@ class SessionStore:
         self.file = file
         self.serialized: str | None = None
         self.dismissed: dict[str, str] = {}
+        # See Ledger._lock above: serializes concurrent save() calls so the
+        # worker-thread write can't race on the shared .tmp path or clobber
+        # self.serialized out of order.
+        self._lock = asyncio.Lock()
 
     async def load(self) -> list[dict[str, Any]]:
         try:
@@ -234,16 +253,24 @@ class SessionStore:
         return rows
 
     async def save(self, rows: Iterable[dict[str, Any]], dismissed: dict[str, str] | None = None) -> None:
-        dismissed = self.dismissed if dismissed is None else dismissed
-        serialized = json.dumps(
-            {
-                "version": 3,
-                "sessions": [_stored_row(row) for row in sort_sessions(rows)],
-                "dismissed": [{"id": id_, "key": key} for id_, key in dismissed.items()],
-            }
-        )
-        if serialized == self.serialized:
-            return
+        async with self._lock:
+            dismissed = self.dismissed if dismissed is None else dismissed
+            serialized = json.dumps(
+                {
+                    "version": 3,
+                    "sessions": [_stored_row(row) for row in sort_sessions(rows)],
+                    "dismissed": [{"id": id_, "key": key} for id_, key in dismissed.items()],
+                }
+            )
+            if serialized == self.serialized:
+                return
+            # Called on every local self-poll cycle under the same shared
+            # lock as the remote-reporter hot path (see Ledger._claim_once
+            # above), so keep the write off the event loop thread.
+            await asyncio.to_thread(self._write_sync, serialized)
+            self.serialized = serialized
+
+    def _write_sync(self, serialized: str) -> None:
         path = Path(self.file)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = Path(f"{self.file}.tmp")

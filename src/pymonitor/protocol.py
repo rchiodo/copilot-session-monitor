@@ -55,6 +55,14 @@ VERSION = 1
 # fresh lease-expiry 409 on an already-recovering connection.
 HEARTBEAT_MS = 25000
 MAX_BYTES = 4 * 1024 * 1024
+# How long a reporter waits for the collector's reply to a single request
+# over the persistent socket before treating the transport as unavailable.
+# The collector serializes all reporters' connect/report/disconnect work
+# behind one lock and does its config/state persistence as blocking file
+# I/O on the event loop thread, so a slow disk op can delay everyone's
+# turn. Generous enough to ride out that pile-up under several
+# concurrently-polling reporters without giving up and redialing.
+RESPONSE_TIMEOUT_S = 15
 UUID_RE = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$", re.IGNORECASE)
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
 CONNECTION_PREFIX = "csm1:"
@@ -519,7 +527,7 @@ class ReporterConnection:
         try:
             ws = await self._ensure_connected()
             await ws.send_str(json.dumps({"route": route, "body": body}))
-            message = await ws.receive(timeout=4)
+            message = await ws.receive(timeout=RESPONSE_TIMEOUT_S)
         except ProtocolError:
             await self.close()
             raise
