@@ -223,9 +223,10 @@ class CollectorConsoleBridge:
         print("What would you like to do?")
         print()
         print("1. Open dashboard")
-        print("2. Test notification")
-        print("3. Generate connection request")
-        print("4. Stop")
+        print("2. Status")
+        print("3. Test notification")
+        print("4. Generate connection request")
+        print("5. Stop")
         print()
 
     def _console_loop(self) -> None:
@@ -247,10 +248,12 @@ class CollectorConsoleBridge:
             if choice == 1:
                 self._cmd_open()
             elif choice == 2:
-                self._cmd_test()
+                self._cmd_status()
             elif choice == 3:
-                self._cmd_generate()
+                self._cmd_test()
             elif choice == 4:
+                self._cmd_generate()
+            elif choice == 5:
                 self._cmd_stop()
                 return
             else:
@@ -261,6 +264,26 @@ class CollectorConsoleBridge:
     def _cmd_open(self) -> None:
         webbrowser.open(self._server.url)
         print(f"Opened dashboard: {self._server.url}")
+
+    def _cmd_status(self) -> None:
+        assert self._loop is not None
+        future = asyncio.run_coroutine_threadsafe(self._status_snapshot(), self._loop)
+        snapshot = future.result()
+        sources = snapshot.get("sources", [])
+        if not sources:
+            print("No paired machines yet. Use 'Generate connection request' to pair one.")
+            return
+        print(snapshot.get("coverage", ""))
+        for source in sources:
+            issue = "; ".join(source.get("issues") or []) or None
+            last_seen = source.get("lastSeen") or "never"
+            print(
+                f"- {source['label']}: healthy={source['healthy']}, "
+                f"lastSeen={last_seen}, issue={issue}"
+            )
+
+    async def _status_snapshot(self) -> dict[str, Any]:
+        return self._server.status()
 
     def _cmd_test(self) -> None:
         assert self._loop is not None

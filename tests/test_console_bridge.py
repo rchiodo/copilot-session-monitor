@@ -31,6 +31,7 @@ def _fake_server() -> MagicMock:
     server.on_power_event = AsyncMock()
     server.on_theme = MagicMock()
     server.on_bridge_ready = MagicMock()
+    server.status = MagicMock(return_value={"sources": [], "coverage": "0/0 paired Windows watchers connected"})
     return server
 
 
@@ -122,6 +123,37 @@ async def test_collector_bridge_cmd_open_opens_browser(monkeypatch: pytest.Monke
     assert server.url in capsys.readouterr().out
 
 
+async def test_collector_bridge_cmd_status_no_sources_prints_hint(capsys: Any) -> None:
+    server = _fake_server()
+    bridge = CollectorConsoleBridge(server, asyncio.Event())
+    await bridge.start()
+    # _cmd_status blocks on future.result() waiting for the event loop (it
+    # normally runs on the background console thread); run it in an
+    # executor thread here so the loop stays free to service the future,
+    # mirroring real usage instead of deadlocking the test itself.
+    await asyncio.get_running_loop().run_in_executor(None, bridge._cmd_status)
+    out = capsys.readouterr().out
+    assert "No paired machines yet" in out
+
+
+async def test_collector_bridge_cmd_status_prints_each_source(capsys: Any) -> None:
+    server = _fake_server()
+    server.status = MagicMock(return_value={
+        "coverage": "1/2 paired Windows watchers connected",
+        "sources": [
+            {"id": "a", "label": "Laptop", "healthy": True, "lastSeen": "2024-01-01T00:00:00.000Z", "issues": []},
+            {"id": "b", "label": "Desktop", "healthy": False, "lastSeen": None, "issues": ["Watcher unavailable"]},
+        ],
+    })
+    bridge = CollectorConsoleBridge(server, asyncio.Event())
+    await bridge.start()
+    await asyncio.get_running_loop().run_in_executor(None, bridge._cmd_status)
+    out = capsys.readouterr().out
+    assert "1/2 paired Windows watchers connected" in out
+    assert "Laptop: healthy=True, lastSeen=2024-01-01T00:00:00.000Z, issue=None" in out
+    assert "Desktop: healthy=False, lastSeen=never, issue=Watcher unavailable" in out
+
+
 async def test_collector_bridge_cmd_test_schedules_test_notification() -> None:
     server = _fake_server()
     bridge = CollectorConsoleBridge(server, asyncio.Event())
@@ -185,12 +217,14 @@ async def test_collector_bridge_console_loop_dispatches_known_commands(monkeypat
     await bridge.start()
     calls: list[str] = []
     monkeypatch.setattr(bridge, "_cmd_open", lambda: calls.append("open"))
+    monkeypatch.setattr(bridge, "_cmd_status", lambda: calls.append("status"))
     monkeypatch.setattr(bridge, "_cmd_test", lambda: calls.append("test"))
-    lines = iter(["1", "2", "  ", "4"])
+    monkeypatch.setattr(bridge, "_cmd_generate", lambda: calls.append("generate"))
+    lines = iter(["1", "2", "3", "  ", "4", "5"])
     monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: calls.append("stop"))
     bridge._console_loop()
-    assert calls == ["open", "test", "stop"]
+    assert calls == ["open", "status", "test", "generate", "stop"]
 
 
 async def test_collector_bridge_console_loop_unknown_command_prints_message(
@@ -199,7 +233,7 @@ async def test_collector_bridge_console_loop_unknown_command_prints_message(
     server = _fake_server()
     bridge = CollectorConsoleBridge(server, asyncio.Event())
     await bridge.start()
-    lines = iter(["bogus", "4"])
+    lines = iter(["bogus", "5"])
     monkeypatch.setattr(cb, "input", lambda prompt="": next(lines), raising=False)
     monkeypatch.setattr(bridge, "_cmd_stop", lambda: None)
     bridge._console_loop()
