@@ -22,6 +22,7 @@ tolerate this gracefully, per Phase 1).
 """
 from __future__ import annotations
 
+import json
 import os
 import socket
 import ssl
@@ -30,7 +31,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
-from aiohttp import web
+from aiohttp import WSMsgType, web
 
 from .actions import DismissError, MonitorActions, read_dismiss_entries
 from .collector import Collector
@@ -48,7 +49,7 @@ from .configuration import (
 from .engine import Ledger, SessionStore, digest
 from .lifecycle import acquire_role
 from .local_report import create_local_observer, local_report_payload, poll_local
-from .protocol import HASH_RE, ProtocolError, authorized, fail, read_json
+from .protocol import HASH_RE, MAX_BYTES, ProtocolError, authorized, fail
 
 _PORT = int(os.environ.get("MONITOR_PORT", "43187"))
 _SELF_OBSERVE = os.environ.get("MONITOR_SELF_OBSERVE", "1") != "0"
@@ -123,6 +124,7 @@ class CollectorServer:
         self._timer_task: Any = None
         self._sse_clients: set[web.StreamResponse] = set()
         self._last_reject_error: dict[str, str] = {}
+        self._reporter_sockets: dict[str, web.WebSocketResponse] = {}
         self.local_reporter_id: str | None = None
         self.processes: dict[str, Any] | None = None
         self.local_reset: str | None = None
@@ -503,9 +505,7 @@ class CollectorServer:
 
     async def _start_ingest_listeners(self) -> None:
         app = web.Application()
-        app.router.add_post("/v1/connect", self._handle_ingest)
-        app.router.add_post("/v1/report", self._handle_ingest)
-        app.router.add_post("/v1/disconnect", self._handle_ingest)
+        app.router.add_get("/v1/socket", self._handle_socket)
         ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
         ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
         ssl_context.load_cert_chain(str(data_dir / "collector-cert.pem"), str(data_dir / "collector-key.pem"))
@@ -516,25 +516,63 @@ class CollectorServer:
             await site.start()
             self._ingest_runners.append(runner)
 
-    async def _handle_ingest(self, request: web.Request) -> web.Response:
+    async def _handle_socket(self, request: web.Request) -> web.WebSocketResponse | web.Response:
+        # Auth preamble: identical to the old per-POST checks in _handle_ingest,
+        # but performed once at handshake time rather than once per request --
+        # the whole point of moving to a persistent socket. Failures here
+        # return a plain (non-upgraded) JSON error response.
         id_ = request.headers.get("X-Monitor-Reporter")
+        if request.headers.get("Origin"):
+            return web.json_response({"error": "Reporter endpoint only"}, status=403)
         try:
-            if request.headers.get("Origin"):
-                raise fail("Reporter endpoint only", 403)
             await self._refresh_configuration()
-            pairing = self.collector.pairings.get(id_) if id_ else None
-            if not pairing or not authorized(request.headers.get("Authorization"), pairing["tokenHash"]):
-                raise fail("Reporter authentication required", 403)
-            value = await read_json(request)
-            result = await self.actions.run(lambda: self._ingest_body(request.path, id_, value))
-            self._last_reject_error.pop(id_, None)
-            return web.json_response(result)
-        except ProtocolError as error:
-            self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
-            return web.json_response({"error": str(error)}, status=error.status)
-        except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
+        except Exception as error:  # noqa: BLE001 -- mirrors the old catch-all; any failure is a 503 persistence/config error.
             self._log_rejection(id_, f"Reporter request rejected ({error})")
             return web.json_response({"error": "Collector persistence/configuration unavailable"}, status=503)
+        pairing = self.collector.pairings.get(id_) if id_ else None
+        if not pairing or not authorized(request.headers.get("Authorization"), pairing["tokenHash"]):
+            return web.json_response({"error": "Reporter authentication required"}, status=403)
+
+        ws = web.WebSocketResponse(heartbeat=10, max_msg_size=MAX_BYTES)
+        await ws.prepare(request)
+
+        # A reconnecting reporter (e.g. after a redial following a transport
+        # failure) may still have its old socket registered. Defer closing it
+        # until the NEW socket has proven itself with one successful message,
+        # so a reporter that opens a socket but never speaks doesn't tear down
+        # a perfectly healthy existing connection.
+        previous = self._reporter_sockets.get(id_)
+        previous_closed = previous is None
+
+        async for message in ws:
+            if message.type != WSMsgType.TEXT:
+                continue
+            try:
+                payload = json.loads(message.data)
+                route, value = payload["route"], payload["body"]
+                result = await self.actions.run(lambda route=route, value=value: self._ingest_body(route, id_, value))
+                if route == "/v1/report":
+                    # See the matching comment this mirrors in the old
+                    # _handle_ingest: only a genuinely accepted report counts
+                    # as recovery for console-spam dedup purposes.
+                    self._last_reject_error.pop(id_, None)
+                await ws.send_json({"ok": True, "body": result})
+            except ProtocolError as error:
+                self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
+                await ws.send_json({"ok": False, "status": error.status, "error": str(error)})
+            except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
+                self._log_rejection(id_, f"Reporter request rejected ({error})")
+                await ws.send_json({"ok": False, "status": 503, "error": "Collector persistence/configuration unavailable"})
+
+            if not previous_closed:
+                if previous is not None and previous is not ws and not previous.closed:
+                    await previous.close()
+                previous_closed = True
+            self._reporter_sockets[id_] = ws
+
+        if self._reporter_sockets.get(id_) is ws:
+            del self._reporter_sockets[id_]
+        return ws
 
     def _log_rejection(self, reporter_id: str | None, message: str) -> None:
         # Repeated identical rejections (e.g. a remote watcher stuck retrying
@@ -548,17 +586,17 @@ class CollectorServer:
         self._last_reject_error[key] = message
         print(message)
 
-    async def _ingest_body(self, path: str, id_: str, value: dict[str, Any]) -> dict[str, Any]:
+    async def _ingest_body(self, route: str, id_: str, value: dict[str, Any]) -> dict[str, Any]:
         await self._refresh_configuration()
         if id_ not in self.collector.pairings:
             raise fail("Reporter revoked", 403)
-        if path == "/v1/disconnect":
+        if route == "/v1/disconnect":
             if len(value) != 1 or not HASH_RE.match(value.get("lease", "")):
                 raise fail("Invalid disconnect")
             return self.collector.disconnect(id_, value["lease"])
         if value.get("reporterId") != id_:
             raise fail("Reporter identity mismatch", 403)
-        if path == "/v1/connect":
+        if route == "/v1/connect":
             return await self.collector.connect(value)
         return await self.collector.accept(value)
 

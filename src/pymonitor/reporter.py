@@ -3,15 +3,16 @@
 `Reporter` is the watcher-side client of the ingestion protocol: it holds
 the validated pairing + durable identity, performs the `/v1/connect`
 handshake to obtain a lease, and sends `/v1/report` envelopes. All network
-I/O goes through `protocol.request()` (cert-pinned HTTPS POST), so this
-module is pure sequencing/bookkeeping around that call.
+I/O goes through a single `protocol.ReporterConnection` held for the
+lifetime of this Reporter (a persistent, cert-pinned WebSocket), so this
+module is pure sequencing/bookkeeping around that connection.
 """
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any
 
-from .protocol import HASH_RE, VERSION, ProtocolError, request, validate_pairing, validate_report
+from .protocol import HASH_RE, VERSION, ProtocolError, ReporterConnection, validate_pairing, validate_report
 
 __all__ = ["Reporter"]
 
@@ -22,9 +23,10 @@ class Reporter:
         self.identity = identity
         self.lease: str | None = None
         self.seq = 0
+        self._conn = ReporterConnection(self.pairing)
 
     async def connect(self) -> None:
-        response = await request(self.pairing, "/v1/connect", {
+        response = await self._conn.request("/v1/connect", {
             "version": VERSION,
             "reporterId": self.pairing["reporterId"],
             **self.identity,
@@ -47,7 +49,7 @@ class Reporter:
         })
         try:
             try:
-                response = await request(self.pairing, "/v1/report", report)
+                response = await self._conn.request("/v1/report", report)
             except ProtocolError as error:
                 if error.status == 409:
                     # The collector expired our lease (or saw an
@@ -61,7 +63,7 @@ class Reporter:
                     report = validate_report({**report, "lease": self.lease, "seq": self.seq + 1})
                 elif error.status != 503:
                     raise
-                response = await request(self.pairing, "/v1/report", report)
+                response = await self._conn.request("/v1/report", report)
             if response.get("seq") != report["seq"]:
                 raise RuntimeError("Unexpected collector acknowledgement")
             self.seq = report["seq"]
@@ -75,4 +77,7 @@ class Reporter:
             return
         lease = self.lease
         self.lease = None
-        await request(self.pairing, "/v1/disconnect", {"lease": lease})
+        try:
+            await self._conn.request("/v1/disconnect", {"lease": lease})
+        finally:
+            await self._conn.close()

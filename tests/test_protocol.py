@@ -10,10 +10,11 @@ from __future__ import annotations
 import datetime
 import hashlib
 import ipaddress
+import json
 import ssl
 
 import pytest
-from aiohttp import web
+from aiohttp import WSMsgType, web
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -365,4 +366,123 @@ async def test_request_rejects_real_tls_server_with_different_cert(tmp_path) -> 
         with pytest.raises(proto.ProtocolError):
             await proto.request(_pairing_for(other_cert_pem, port), "v1/report", {"kind": "finished"})
     finally:
+        await runner.cleanup()
+
+
+# -- ReporterConnection: real (non-mocked) TLS WebSocket integration ------------
+#
+# test_reporter.py exercises Reporter's retry/lease logic against a fake
+# ReporterConnection, and the unit tests above cover request()'s one-shot
+# HTTPS transport. Neither proves the actual WebSocket upgrade, framing, and
+# cert-pin check in ReporterConnection itself work against a real server --
+# these tests close that gap the same way the request() tests above closed
+# it for the old transport.
+
+
+async def _echo_ws(request: web.Request) -> web.WebSocketResponse:
+    ws = web.WebSocketResponse(heartbeat=10)
+    await ws.prepare(request)
+    async for message in ws:
+        if message.type != WSMsgType.TEXT:
+            continue
+        payload = json.loads(message.data)
+        body = payload.get("body")
+        if isinstance(body, dict) and body.get("kind") == "reject":
+            await ws.send_str(json.dumps(
+                {"ok": False, "status": 409, "error": "Lease expired; reconnect and baseline"}
+            ))
+        else:
+            await ws.send_str(json.dumps({"ok": True, "body": body}))
+    return ws
+
+
+async def _start_tls_socket_server(tmp_path, cert_pem: str, key_pem: bytes, handler=_echo_ws) -> tuple[web.AppRunner, int]:
+    cert_path = tmp_path / "server-cert.pem"
+    key_path = tmp_path / "server-key.pem"
+    cert_path.write_text(cert_pem, encoding="ascii")
+    key_path.write_bytes(key_pem)
+    ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ssl_context.load_cert_chain(str(cert_path), str(key_path))
+    app = web.Application()
+    app.router.add_get("/v1/socket", handler)
+    runner = web.AppRunner(app, shutdown_timeout=2.0)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0, ssl_context=ssl_context)
+    await site.start()
+    port = runner.addresses[0][1]
+    return runner, port
+
+
+async def test_reporter_connection_succeeds_against_real_tls_ws_server_with_matching_pin(tmp_path) -> None:
+    """ReporterConnection must complete a real (non-mocked) TLS WebSocket
+    handshake and round-trip a request/response."""
+    cert_pem, key_pem = _self_signed_cert_and_key()
+    runner, port = await _start_tls_socket_server(tmp_path, cert_pem, key_pem)
+    conn = proto.ReporterConnection(_pairing_for(cert_pem, port))
+    try:
+        result = await conn.request("/v1/report", {"kind": "finished"})
+        assert result == {"kind": "finished"}
+        assert conn.closed is False
+    finally:
+        await conn.close()
+        await runner.cleanup()
+
+
+async def test_reporter_connection_reuses_socket_across_requests(tmp_path) -> None:
+    """A second request over the same ReporterConnection must not open a new
+    TLS connection -- this is the whole point of the WebSocket migration:
+    avoiding a fresh handshake (and the lease/sequence bookkeeping that used
+    to ride along with it) on every single call."""
+    cert_pem, key_pem = _self_signed_cert_and_key()
+    connections = 0
+
+    async def _counting_echo(request: web.Request) -> web.WebSocketResponse:
+        nonlocal connections
+        connections += 1
+        return await _echo_ws(request)
+
+    runner, port = await _start_tls_socket_server(tmp_path, cert_pem, key_pem, _counting_echo)
+    conn = proto.ReporterConnection(_pairing_for(cert_pem, port))
+    try:
+        await conn.request("/v1/report", {"n": 1})
+        await conn.request("/v1/report", {"n": 2})
+        assert connections == 1
+    finally:
+        await conn.close()
+        await runner.cleanup()
+
+
+async def test_reporter_connection_surfaces_collector_rejection_and_keeps_socket_open(tmp_path) -> None:
+    """An application-level rejection (e.g. a 409) must not close the
+    socket -- reporter.py's retry logic reuses the same connection, exactly
+    as a failed POST never used to tear anything down under the old
+    transport either."""
+    cert_pem, key_pem = _self_signed_cert_and_key()
+    runner, port = await _start_tls_socket_server(tmp_path, cert_pem, key_pem)
+    conn = proto.ReporterConnection(_pairing_for(cert_pem, port))
+    try:
+        with pytest.raises(proto.ProtocolError, match="Lease expired; reconnect and baseline"):
+            await conn.request("/v1/report", {"kind": "reject"})
+        assert conn.closed is False
+
+        # The same socket must still work for a subsequent successful call.
+        result = await conn.request("/v1/report", {"kind": "finished"})
+        assert result == {"kind": "finished"}
+    finally:
+        await conn.close()
+        await runner.cleanup()
+
+
+async def test_reporter_connection_rejects_real_tls_ws_server_with_different_cert(tmp_path) -> None:
+    """A real TLS WS server presenting a cert other than the pinned one must
+    still be rejected -- the cert-pin check is not bypassed over WebSocket."""
+    server_cert_pem, key_pem = _self_signed_cert_and_key()
+    other_cert_pem, _unused_key = _self_signed_cert_and_key()
+    runner, port = await _start_tls_socket_server(tmp_path, server_cert_pem, key_pem)
+    conn = proto.ReporterConnection(_pairing_for(other_cert_pem, port))
+    try:
+        with pytest.raises(proto.ProtocolError):
+            await conn.request("/v1/report", {"kind": "finished"})
+    finally:
+        await conn.close()
         await runner.cleanup()

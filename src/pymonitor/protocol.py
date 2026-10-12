@@ -41,6 +41,7 @@ __all__ = [
     "digest", "metadata", "observed_metadata", "ProtocolError", "fail",
     "validate_connect", "validate_report", "read_json", "authorized", "private_address",
     "validate_pairing", "encode_connection_string", "decode_connection_string", "request",
+    "ReporterConnection",
 ]
 
 VERSION = 1
@@ -469,3 +470,145 @@ async def request(pairing: dict[str, Any], route: str, body: dict[str, Any]) -> 
         raise
     except Exception as error:
         raise fail(f"Collector transport unavailable ({type(error).__name__})", 503) from error
+
+
+def _ws_url(collector_url: str) -> str:
+    """Derives the wss:// WebSocket endpoint from a pairing's HTTPS collectorUrl."""
+    parsed = urlsplit(urljoin(collector_url, "/v1/socket"))
+    return parsed._replace(scheme="wss").geturl()
+
+
+class ReporterConnection:
+    """Persistent, cert-pinned WebSocket used by reporter.py for all `/v1/*` traffic.
+
+    request() above dials a brand-new HTTPS POST -- and therefore a brand-new
+    TLS handshake -- for every single connect/report/disconnect call. That is
+    what made a transient outage look like a hard failure: each retry paid
+    full connection setup cost again, and the collector had no way to tell
+    "the same watcher reconnecting" from "a new watcher" without a
+    hand-rolled lease/sequence liveness check layered on top, which is what
+    produced the recurring, non-self-repairing "Lease expired (409)" loop
+    this class replaces.
+
+    One ReporterConnection is held for the lifetime of a Reporter and reused
+    across its entire run: request() lazily opens the socket on first use and
+    only redials on an actual transport failure (closed/broken socket), never
+    on an application-level rejection (e.g. a 409) -- those are still
+    retried by reporter.py exactly as before, just as another message over
+    the same open connection instead of a fresh dial. The wire framing is a
+    JSON envelope per message (`{"route": ..., "body": ...}` out,
+    `{"ok": ..., ...}` in) carrying the exact same connect/report/disconnect
+    bodies previously sent as POST bodies, so collector-side validation and
+    this class's ProtocolError message vocabulary are unchanged from
+    request() -- only the transport underneath changed.
+    """
+
+    def __init__(self, pairing: dict[str, Any]) -> None:
+        self.pairing = pairing
+        self._session: aiohttp.ClientSession | None = None
+        self._ws: aiohttp.ClientWebSocketResponse | None = None
+
+    @property
+    def closed(self) -> bool:
+        return self._ws is None or self._ws.closed
+
+    async def request(self, route: str, body: dict[str, Any]) -> Any:
+        data = json.dumps(body)
+        if len(data.encode("utf-8")) > MAX_BYTES:
+            raise fail("Report too large", 413)
+        try:
+            ws = await self._ensure_connected()
+            await ws.send_str(json.dumps({"route": route, "body": body}))
+            message = await ws.receive(timeout=4)
+        except ProtocolError:
+            await self.close()
+            raise
+        except Exception as error:
+            await self.close()
+            raise fail(f"Collector transport unavailable ({type(error).__name__})", 503) from error
+
+        if message.type in (
+            aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED,
+        ):
+            await self.close()
+            raise fail("Collector transport unavailable (ConnectionClosed)", 503)
+        if message.type == aiohttp.WSMsgType.ERROR:
+            await self.close()
+            raise fail(f"Collector transport unavailable ({type(ws.exception()).__name__})", 503)
+        if message.type != aiohttp.WSMsgType.TEXT:
+            await self.close()
+            raise fail("Invalid collector response")
+
+        raw = message.data
+        if len(raw.encode("utf-8")) > 65536:
+            await self.close()
+            raise fail("Collector response too large")
+        try:
+            envelope = json.loads(raw)
+        except Exception as error:
+            await self.close()
+            raise fail("Invalid collector response") from error
+        if not isinstance(envelope, dict) or "ok" not in envelope:
+            await self.close()
+            raise fail("Invalid collector response")
+
+        if not envelope["ok"]:
+            status = envelope.get("status")
+            status = status if isinstance(status, int) else 503
+            reason = envelope.get("error")
+            text = f"Collector rejected request ({status})"
+            if isinstance(reason, str) and reason:
+                text = f"{text}: {reason}"
+            # Application-level rejection (e.g. a 409): the socket stays
+            # open so reporter.py's existing retry semantics can reuse it,
+            # exactly as a failed POST never used to close anything either.
+            raise fail(text, status)
+        return envelope.get("body")
+
+    async def _ensure_connected(self) -> aiohttp.ClientWebSocketResponse:
+        if self._ws is not None and not self._ws.closed:
+            return self._ws
+        await self.close()
+        try:
+            ssl_context = ssl_module.create_default_context(cadata=self.pairing["certificate"])
+            expected_der = _cert_der(self.pairing["certificate"])
+        except Exception as error:
+            raise fail(f"Collector transport unavailable ({type(error).__name__})", 503) from error
+        url = _ws_url(self.pairing["collectorUrl"])
+        headers = {
+            "X-Monitor-Reporter": self.pairing["reporterId"],
+            "Authorization": f"Bearer {self.pairing['token']}",
+        }
+        connector = _PinCapturingConnector(ssl=ssl_context)
+        session = aiohttp.ClientSession(connector=connector)
+        try:
+            ws = await session.ws_connect(
+                url, headers=headers, ssl=ssl_context, heartbeat=10, max_msg_size=MAX_BYTES,
+            )
+        except Exception as error:
+            await session.close()
+            raise fail(f"Collector transport unavailable ({type(error).__name__})", 503) from error
+        peer_der = connector.captured_peer_der
+        if peer_der is None or peer_der != expected_der:
+            await ws.close()
+            await session.close()
+            expected_fp = _der_fingerprint_sha256(expected_der)
+            peer_fp = _der_fingerprint_sha256(peer_der) if peer_der is not None else "none"
+            raise fail(f"Collector certificate pin mismatch (pinned {expected_fp}, server presented {peer_fp})")
+        self._session = session
+        self._ws = ws
+        return ws
+
+    async def close(self) -> None:
+        ws, self._ws = self._ws, None
+        session, self._session = self._session, None
+        if ws is not None and not ws.closed:
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        if session is not None:
+            try:
+                await session.close()
+            except Exception:
+                pass

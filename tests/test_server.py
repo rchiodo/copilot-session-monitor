@@ -34,13 +34,14 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
-from aiohttp import web
+from aiohttp import WSMsgType, web
 from aiohttp.test_utils import TestClient, TestServer
 
 import pymonitor.server as server_module
 from pymonitor.actions import MonitorActions
 from pymonitor.collector import Collector
 from pymonitor.engine import Ledger
+from pymonitor.protocol import digest
 from pymonitor.server import CollectorServer, _STATIC_ASSETS
 
 
@@ -362,6 +363,137 @@ async def test_stream_broadcasts_after_dismiss(dashboard) -> None:
     assert second["updatedAt"] != first["updatedAt"]
 
     stream_resp.close()
+
+
+# -- /v1/* ingestion dedup ---------------------------------------------------
+#
+# Regression test for the console-spam bug: a bare `/v1/connect` success
+# must NOT clear `_last_reject_error`'s dedup state. Only a genuinely
+# accepted `/v1/report` should. Otherwise the reporter's retry-on-409 path
+# (connect, then retry report) perpetually wipes dedup right before an
+# identical report failure recurs, printing the same rejection every poll.
+
+
+def _build_ingest_app(server: CollectorServer) -> web.Application:
+    app = web.Application()
+    app.router.add_get("/v1/socket", server._handle_socket)
+    return app
+
+
+@pytest.fixture
+async def ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    server = await _make_server(tmp_path)
+    server.config["id"] = "test-instance"
+    server.config["bindAddress"] = "127.0.0.1"
+    server.config["port"] = 0
+    monkeypatch.setattr(server_module, "load_collector", AsyncMock(return_value=server.config))
+    app = _build_ingest_app(server)
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        yield server, client
+    finally:
+        await client.close()
+
+
+async def _send(ws, route: str, body: dict[str, Any]) -> dict[str, Any]:
+    """Send one {route, body} request frame over an already-connected
+    reporter socket and return a response dict with a `.status`-like key so
+    assertions below read the same way they did against the old per-call
+    POST responses."""
+    await ws.send_json({"route": route, "body": body})
+    message = await ws.receive_json()
+    status = 200 if message.get("ok") else message.get("status", 400)
+    return {"status": status, **message}
+
+
+async def test_connect_success_does_not_clear_report_rejection_dedup(ingest, capsys) -> None:
+    server, client = ingest
+    reporter_id = server.config["reporters"][0]["id"]
+    token = "shared-secret"
+    server.config["reporters"][0]["tokenHash"] = digest(token)
+    server.collector.pairings[reporter_id]["tokenHash"] = digest(token)
+    headers = {"X-Monitor-Reporter": reporter_id, "Authorization": f"Bearer {token}"}
+
+    # A lease that can never match the collector's freshly-issued one, so
+    # every /v1/report below fails with the same "Lease expired" message --
+    # simulating the real-world race (e.g. two watcher instances) that keeps
+    # reports failing even immediately after a successful reconnect.
+    bad_report = {
+        "version": 1, "reporterId": reporter_id, "lease": "f" * 64, "seq": 1,
+        "sentAt": "2026-01-01T12:00:00.000Z", "healthy": True, "issues": [],
+        "members": [], "relatives": [], "notices": [],
+    }
+
+    async with client.ws_connect("/v1/socket", headers=headers) as ws:
+        capsys.readouterr()
+        first = await _send(ws, "/v1/report", bad_report)
+        assert first["status"] == 409
+        assert capsys.readouterr().out.count("Lease expired") == 1
+
+        # Repeating the identical failure must stay deduped (no new print).
+        again = await _send(ws, "/v1/report", bad_report)
+        assert again["status"] == 409
+        assert capsys.readouterr().out == ""
+
+        connect_payload = {
+            "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+            "bootId": str(uuid.uuid4()), "generation": 1,
+        }
+        connected = await _send(ws, "/v1/connect", connect_payload)
+        assert connected["status"] == 200
+        # The bug: a bare connect success must not print anything, nor clear dedup.
+        assert capsys.readouterr().out == ""
+
+        # The retried report (still using the stale lease) fails identically --
+        # this must remain suppressed, not print again.
+        retried = await _send(ws, "/v1/report", bad_report)
+        assert retried["status"] == 409
+        assert capsys.readouterr().out == ""
+
+
+async def test_reconnect_closes_previous_socket_only_after_new_one_proves_itself(ingest) -> None:
+    """A reporter that redials (e.g. after a transport failure) opens a new
+    socket while its old one may still be registered. The old socket must
+    stay alive merely from the new one connecting, and only get closed once
+    the new socket has successfully handled one message -- never tearing
+    down a healthy connection just because a second one showed up but never
+    spoke."""
+    server, client = ingest
+    reporter_id = server.config["reporters"][0]["id"]
+    token = "shared-secret"
+    server.config["reporters"][0]["tokenHash"] = digest(token)
+    server.collector.pairings[reporter_id]["tokenHash"] = digest(token)
+    auth_value = "Bearer " + token
+    headers = {"X-Monitor-Reporter": reporter_id, "Authorization": auth_value}
+    connect_payload = {
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 1,
+    }
+
+    old_ws = await client.ws_connect("/v1/socket", headers=headers)
+    new_ws = None
+    try:
+        first = await _send(old_ws, "/v1/connect", connect_payload)
+        assert first["status"] == 200
+        assert old_ws.closed is False
+
+        new_ws = await client.ws_connect("/v1/socket", headers=headers)
+        # Opening the new socket alone must not evict the still-healthy old one.
+        assert old_ws.closed is False
+
+        second = await _send(new_ws, "/v1/connect", connect_payload)
+        assert second["status"] == 200
+
+        # Only now, after the new socket proved itself, is the old one closed.
+        close_message = await old_ws.receive(timeout=1)
+        assert close_message.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED)
+        assert old_ws.closed is True
+    finally:
+        if new_ws is not None:
+            await new_ws.close()
+        if not old_ws.closed:
+            await old_ws.close()
 
 
 # -- static assets --------------------------------------------------------------
