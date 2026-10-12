@@ -126,10 +126,49 @@ async def test_send_retries_once_on_503(reporter: Reporter, monkeypatch: pytest.
     assert mock_request.await_count == 2
 
 
-async def test_send_does_not_retry_non_503_errors(reporter: Reporter, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_send_retries_once_on_409_via_reconnect(reporter: Reporter, monkeypatch: pytest.MonkeyPatch) -> None:
     reporter.lease = "a" * 64
-    error_409 = proto.ProtocolError("Lease conflict", 409)
-    mock_request = AsyncMock(side_effect=error_409)
+    reporter.seq = 3
+    new_lease = "b" * 64
+    error_409 = proto.ProtocolError("Lease expired; reconnect and baseline", 409)
+    mock_request = AsyncMock(side_effect=[
+        error_409,
+        {"version": proto.VERSION, "lease": new_lease},
+        {"seq": 1},
+    ])
+    monkeypatch.setattr("pymonitor.reporter.request", mock_request)
+
+    response = await reporter.send(_snapshot())
+
+    assert response == {"seq": 1}
+    assert reporter.lease == new_lease
+    assert reporter.seq == 1
+    assert mock_request.await_count == 3
+    routes = [call.args[1] for call in mock_request.await_args_list]
+    assert routes == ["/v1/report", "/v1/connect", "/v1/report"]
+    final_body = mock_request.await_args_list[-1].args[2]
+    assert final_body["lease"] == new_lease
+    assert final_body["seq"] == 1
+
+
+async def test_send_409_retry_failure_propagates(reporter: Reporter, monkeypatch: pytest.MonkeyPatch) -> None:
+    reporter.lease = "a" * 64
+    error_report = proto.ProtocolError("Lease expired; reconnect and baseline", 409)
+    error_connect = proto.ProtocolError("Another watcher instance holds this identity", 409)
+    mock_request = AsyncMock(side_effect=[error_report, error_connect])
+    monkeypatch.setattr("pymonitor.reporter.request", mock_request)
+
+    with pytest.raises(proto.ProtocolError, match="Another watcher instance"):
+        await reporter.send(_snapshot())
+
+    assert mock_request.await_count == 2
+    assert reporter.lease is None, "lease must be dropped on any send failure"
+
+
+async def test_send_does_not_retry_non_retryable_errors(reporter: Reporter, monkeypatch: pytest.MonkeyPatch) -> None:
+    reporter.lease = "a" * 64
+    error_403 = proto.ProtocolError("Reporter revoked", 403)
+    mock_request = AsyncMock(side_effect=error_403)
     monkeypatch.setattr("pymonitor.reporter.request", mock_request)
 
     with pytest.raises(proto.ProtocolError):

@@ -49,7 +49,17 @@ class Reporter:
             try:
                 response = await request(self.pairing, "/v1/report", report)
             except ProtocolError as error:
-                if error.status != 503:
+                if error.status == 409:
+                    # The collector expired our lease (or saw an
+                    # out-of-order sequence), most often after a network
+                    # outage longer than the heartbeat window. A fresh
+                    # connect() establishes a new lease/baseline without
+                    # disturbing already-tracked sessions (see
+                    # watcher.py's poll()), so retry once with a clean
+                    # handshake instead of surfacing a transient error.
+                    await self.connect()
+                    report = validate_report({**report, "lease": self.lease, "seq": self.seq + 1})
+                elif error.status != 503:
                     raise
                 response = await request(self.pairing, "/v1/report", report)
             if response.get("seq") != report["seq"]:
