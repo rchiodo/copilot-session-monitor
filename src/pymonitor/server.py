@@ -122,6 +122,7 @@ class CollectorServer:
         self._ingest_runners: list[web.AppRunner] = []
         self._timer_task: Any = None
         self._sse_clients: set[web.StreamResponse] = set()
+        self._last_reject_error: dict[str, str] = {}
         self.local_reporter_id: str | None = None
         self.processes: dict[str, Any] | None = None
         self.local_reset: str | None = None
@@ -185,9 +186,10 @@ class CollectorServer:
         self.local_polling = True
         try:
             await self.actions.run(self._local_poll_body)
+            self._last_reject_error.pop("<local>", None)
         except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; drop the lease and keep polling later.
             self.local_lease = None
-            print(f"Local self-observation unavailable ({error})")
+            self._log_rejection("<local>", f"Local self-observation unavailable ({error})")
         finally:
             self.local_polling = False
 
@@ -306,10 +308,11 @@ class CollectorServer:
                     await self.actions.run(self._refresh_tick)
                     await self._local_poll()
                     await self._broadcast_status()
+                    self._last_reject_error.pop("<loop>", None)
                 except Exception as error:  # noqa: BLE001 - this loop must never die silently; log and retry
                     # on the next tick instead of leaving the collector's self-observation/broadcast stuck
                     # forever (see the matching hardening in watcher.py's _loop()).
-                    print(f"Collector poll loop error ({type(error).__name__}): {error}")
+                    self._log_rejection("<loop>", f"Collector poll loop error ({type(error).__name__}): {error}")
 
         self._timer_task = asyncio.ensure_future(_loop())
         await self._local_poll()
@@ -514,23 +517,36 @@ class CollectorServer:
             self._ingest_runners.append(runner)
 
     async def _handle_ingest(self, request: web.Request) -> web.Response:
+        id_ = request.headers.get("X-Monitor-Reporter")
         try:
             if request.headers.get("Origin"):
                 raise fail("Reporter endpoint only", 403)
             await self._refresh_configuration()
-            id_ = request.headers.get("X-Monitor-Reporter")
             pairing = self.collector.pairings.get(id_) if id_ else None
             if not pairing or not authorized(request.headers.get("Authorization"), pairing["tokenHash"]):
                 raise fail("Reporter authentication required", 403)
             value = await read_json(request)
             result = await self.actions.run(lambda: self._ingest_body(request.path, id_, value))
+            self._last_reject_error.pop(id_, None)
             return web.json_response(result)
         except ProtocolError as error:
-            print(f"Reporter request rejected ({error.status})")
+            self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
             return web.json_response({"error": str(error)}, status=error.status)
         except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
-            print(f"Reporter request rejected ({error})")
+            self._log_rejection(id_, f"Reporter request rejected ({error})")
             return web.json_response({"error": "Collector persistence/configuration unavailable"}, status=503)
+
+    def _log_rejection(self, reporter_id: str | None, message: str) -> None:
+        # Repeated identical rejections (e.g. a remote watcher stuck retrying
+        # through an outage) would otherwise print once per HTTP request and
+        # flood the console, burying the interactive menu. Only print when
+        # the message changes for a given reporter, mirroring watcher.py's
+        # own `_last_error` dedup for its local report loop.
+        key = reporter_id or "<unidentified>"
+        if self._last_reject_error.get(key) == message:
+            return
+        self._last_reject_error[key] = message
+        print(message)
 
     async def _ingest_body(self, path: str, id_: str, value: dict[str, Any]) -> dict[str, Any]:
         await self._refresh_configuration()

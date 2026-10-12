@@ -1,0 +1,10 @@
+Dedup collector console spam; widen HEARTBEAT_MS to 25000ms
+
+- server.py: add _last_reject_error dict + _log_rejection() helper so
+  repeated identical rejections (reporter 409s, local self-observation
+  failures, loop errors) print once per change instead of once per
+  request, matching watcher.py's existing dedup pattern. Entries clear
+  on recovery so a future recurrence still prints.
+- protocol.py: widen HEARTBEAT_MS from 15000 to 25000ms to match the
+  retry-chain margin already used for engine.GAP_THRESHOLD_MS, reducing
+  spurious lease-expiry 409s from transient network flakiness.

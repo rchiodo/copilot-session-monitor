@@ -44,7 +44,15 @@ __all__ = [
 ]
 
 VERSION = 1
-HEARTBEAT_MS = 15000
+# Collector-side lease staleness window, in milliseconds. accept()/connect()
+# reject a reporter whose lastSeen is older than this as "Lease expired".
+# reporter.send() can chain a connect() + two /v1/report attempts within a
+# single poll() cycle, each bounded by this module's own ~4s ClientTimeout
+# (see the matching comment on engine.GAP_THRESHOLD_MS), so transient
+# network flakiness can approach ~12-16s even when nothing is truly stalled.
+# Keep real margin above that worst case so retries don't repeatedly trip a
+# fresh lease-expiry 409 on an already-recovering connection.
+HEARTBEAT_MS = 25000
 MAX_BYTES = 4 * 1024 * 1024
 UUID_RE = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$", re.IGNORECASE)
 HASH_RE = re.compile(r"^[a-f0-9]{64}$")
