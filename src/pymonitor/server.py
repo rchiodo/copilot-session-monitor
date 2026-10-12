@@ -556,13 +556,24 @@ class CollectorServer:
                     # _handle_ingest: only a genuinely accepted report counts
                     # as recovery for console-spam dedup purposes.
                     self._last_reject_error.pop(id_, None)
-                await ws.send_json({"ok": True, "body": result})
+                reply = {"ok": True, "body": result}
             except ProtocolError as error:
                 self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
-                await ws.send_json({"ok": False, "status": error.status, "error": str(error)})
+                reply = {"ok": False, "status": error.status, "error": str(error)}
             except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
                 self._log_rejection(id_, f"Reporter request rejected ({error})")
-                await ws.send_json({"ok": False, "status": 503, "error": "Collector persistence/configuration unavailable"})
+                reply = {"ok": False, "status": 503, "error": "Collector persistence/configuration unavailable"}
+
+            try:
+                await ws.send_json(reply)
+            except OSError:
+                # The reporter's socket dropped out from under us (process
+                # exit, network blip) while we were replying -- not an
+                # application-level rejection, so nothing to log and no
+                # point retrying the send on a transport that's already
+                # gone. Stop servicing this socket; the reporter will
+                # redial and open a fresh one.
+                break
 
             if not previous_closed:
                 if previous is not None and previous is not ws and not previous.closed:

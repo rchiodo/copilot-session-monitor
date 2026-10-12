@@ -496,6 +496,44 @@ async def test_reconnect_closes_previous_socket_only_after_new_one_proves_itself
             await old_ws.close()
 
 
+async def test_socket_send_failure_on_disconnect_does_not_crash_handler(ingest, capsys, monkeypatch) -> None:
+    """If the reporter's transport drops out from under us while we're
+    replying (process exit, network blip -- the real-world "Cannot write
+    to closing transport" case), the handler must not crash with an
+    unhandled second-send exception, and must not log a misleading
+    "rejected" message: nothing was actually rejected, the socket is just
+    gone."""
+    server, client = ingest
+    reporter_id = server.config["reporters"][0]["id"]
+    token = "shared-secret"
+    server.config["reporters"][0]["tokenHash"] = digest(token)
+    server.collector.pairings[reporter_id]["tokenHash"] = digest(token)
+    auth_value = "Bearer " + token
+    headers = {"X-Monitor-Reporter": reporter_id, "Authorization": auth_value}
+    connect_payload = {
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 1,
+    }
+
+    async def _failing_send_json(self, *args, **kwargs):
+        raise ConnectionResetError("Cannot write to closing transport")
+
+    monkeypatch.setattr(web.WebSocketResponse, "send_json", _failing_send_json)
+
+    capsys.readouterr()
+    async with client.ws_connect("/v1/socket", headers=headers) as ws:
+        await ws.send_json({"route": "/v1/connect", "body": connect_payload})
+        # The server can never reply (send_json is patched to always fail),
+        # so the only thing the test client can observe is the server
+        # giving up on the socket cleanly -- not an unhandled exception
+        # that aiohttp would otherwise log with a traceback.
+        message = await ws.receive(timeout=1)
+        assert message.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR)
+
+    assert "Reporter request rejected" not in capsys.readouterr().out
+
+
+
 # -- static assets --------------------------------------------------------------
 
 
