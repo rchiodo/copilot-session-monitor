@@ -145,7 +145,7 @@ function row(item) {
   relatives.hidden = !item.members;
   hierarchy.hidden = !item.hierarchyIssue;
   text(hierarchy, item.hierarchyIssue ? `Hierarchy unconfirmed: ${item.hierarchyIssue}` : '');
-  text(compactTime, compact);
+  text(compactTime, `${item.machineTag ?? item.machine} | ${compact}`);
   compactTime.className = `compact-time${hasFinishedTime ? ' finished-time' : ''}`;
   text(metadata, `${item.source} | ${item.machineTag ?? item.machine}`);
   text(detail, item.state === 'working' && !item.members ? `${item.activity} | ${elapsed(item.startedAt)}` : item.detail);

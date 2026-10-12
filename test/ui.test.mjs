@@ -145,14 +145,14 @@ test('UI preserves server response ordering, explicit completion time, fallback 
   assert.equal(part(cards[0], 'row-title').title, finished.title);
   assert.equal(part(cards[0], 'full-title').textContent, finished.title);
   assert.match(part(cards[0], 'timestamp').textContent, /^Last assistant response:/);
-  assert.equal(part(cards[0], 'finished-time').textContent, `Finished (observed): ${new Date(timestamp).toLocaleString(undefined, {
+  assert.equal(part(cards[0], 'finished-time').textContent, `TEST | Finished (observed): ${new Date(timestamp).toLocaleString(undefined, {
     dateStyle: 'short', timeStyle: 'short',
   })}`);
   assert.equal(part(cards[0], 'row-details').children[4].textContent, `Run finished (observed): ${new Date(timestamp).toLocaleString(undefined, {
     dateStyle: 'medium', timeStyle: 'medium',
   })}`);
   assert.match(part(working, 'timestamp').textContent, /^No assistant response recorded.*ordering fallback/);
-  assert.match(part(working, 'compact-time').textContent, /^First seen:.*\(no response\)$/);
+  assert.match(part(working, 'compact-time').textContent, /^TEST \| First seen:.*\(no response\)$/);
   assert.equal(part(working, 'finished-time').hidden, true);
   assert.equal(badgeText(cards[1]), 'Error');
   assert.equal(badgeText(cards[2]), 'Unconfirmed');
@@ -218,7 +218,7 @@ test('native disclosure, focus and full values survive polling, sorting and move
   assert.equal(card.open, true);
   assert.equal(fixture.document.activeElement, summary);
   assert.equal(badgeText(card), 'Plan approval needed');
-  assert.match(part(card, 'compact-time').textContent, /^Response:/);
+  assert.match(part(card, 'compact-time').textContent, /^Full machine value \| Response:/);
   assert.equal(part(card, 'full-title').textContent, 'A full updated long title');
   assert.match(part(card, 'muted').textContent, /Full machine value/);
   card.open = false;
@@ -238,18 +238,18 @@ test('one family card separates aggregate work from the parent alert and exposes
   assert.equal(fixture.nodes.get('retained').children.length, 0);
   assert.equal(titleText(card), 'Parent title');
   assert.equal(badgeText(card), 'Working 1/2');
-  assert.match(part(card, 'compact-time').textContent, /^Parent alert: Finished - /);
+  assert.match(part(card, 'compact-time').textContent, /^TEST \| Parent alert: Finished - /);
   assert.match(part(card, 'parent-alert').textContent, /Parent current run finished/);
   assert.match(contents(part(card, 'relatives')), /Child: Child title - Working/);
   fixture.fail = true;
   await fixture.poll();
   assert.equal(badgeText(card), 'Unconfirmed');
-  assert.match(part(card, 'compact-time').textContent, /^Parent alert: Finished/);
+  assert.match(part(card, 'compact-time').textContent, /^TEST \| Parent alert: Finished/);
   assert.match(contents(part(card, 'relatives')), /Child title - Unconfirmed/);
   fixture.fail = false;
   fixture.status.sessions = [{ ...family, parentAlert: null, lastResponseAt: null, hierarchyIssue: 'Recorded parent is missing' }];
   await fixture.poll();
-  assert.match(part(card, 'compact-time').textContent, /^No parent alert observed; first seen/);
+  assert.match(part(card, 'compact-time').textContent, /^TEST \| No parent alert observed; first seen/);
   assert.equal(part(card, 'hierarchy-warning').hidden, false);
   assert.match(part(card, 'hierarchy-warning').textContent, /Recorded parent is missing/);
 });
@@ -268,7 +268,7 @@ test('family card compact time reflects the most recent family activity even whe
   const card = fixture.nodes.get('running').children[0];
   // The parent's own alert (20:00) is older than a descendant's response (21:30); the
   // card must surface the newer family-wide time, not go backward to the alert's time.
-  assert.equal(part(card, 'compact-time').textContent, `Parent alert: Finished - ${compactTimeText(descendantResponseAt)}`);
+  assert.equal(part(card, 'compact-time').textContent, `TEST | Parent alert: Finished - ${compactTimeText(descendantResponseAt)}`);
 });
 
 test('dismiss controls are distinct native buttons, only shown when a dismissKey exists, and never toggle disclosure', async () => {
