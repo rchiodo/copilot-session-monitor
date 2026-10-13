@@ -297,14 +297,21 @@ class Collector:
             raise
         return {"version": 1, "lease": new_source["lease"], "heartbeatMs": HEARTBEAT_MS, "serverTime": _iso(now)}
 
-    async def accept(self, value: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    async def accept(
+        self,
+        value: dict[str, Any],
+        now: float | None = None,
+        *,
+        lease_proven_on_socket: bool = False,
+    ) -> dict[str, Any]:
         if now is None:
             now = time.time() * 1000
         validate_report(value)
         source = self.sources.get(value["reporterId"])
         if (
             not source or source["id"] not in self.pairings or source.get("lease") != value["lease"]
-            or now - source["lastSeen"] < 0 or now - source["lastSeen"] >= HEARTBEAT_MS
+            or now - source["lastSeen"] < 0
+            or (not lease_proven_on_socket and now - source["lastSeen"] >= HEARTBEAT_MS)
         ):
             raise fail("Lease expired; reconnect and baseline", 409)
         body_hash = digest(json.dumps(value, separators=(",", ":")))

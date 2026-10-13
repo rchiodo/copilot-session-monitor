@@ -18,7 +18,7 @@ import pytest
 from pymonitor.collector import Collector
 from pymonitor.engine import Ledger
 from pymonitor.families import group_families
-from pymonitor.protocol import HEARTBEAT_MS, digest, metadata, observed_metadata, validate_report
+from pymonitor.protocol import HEARTBEAT_MS, ProtocolError, digest, metadata, observed_metadata, validate_report
 
 AT = "2026-01-01T12:00:00.000Z"
 NOW = datetime.fromisoformat(AT.replace("Z", "+00:00")).timestamp() * 1000
@@ -177,6 +177,76 @@ async def test_omissions_unknown_clock_skew_heartbeat_loss(fixture: Fixture) -> 
         assert len(f.alerts) == 0, mode
         if mode != "heartbeat":
             assert f.collector.snapshot(NOW)["sessions"][0]["state"] == "unknown", mode
+
+
+@pytest.mark.asyncio
+async def test_proven_socket_bypasses_only_stale_lease_age(fixture: Fixture) -> None:
+    f = fixture
+    await f.connect()
+    first = await f.report(0, [member()])
+    source = f.collector.sources[f.identities[0]["reporterId"]]
+    stale_now = NOW + HEARTBEAT_MS
+    next_report = {
+        **first,
+        "seq": source["seq"] + 1,
+        "sentAt": datetime.fromtimestamp(stale_now / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+
+    await f.collector.accept(next_report, stale_now, lease_proven_on_socket=True)
+    assert source["seq"] == 2
+
+    with pytest.raises(ProtocolError, match="Lease expired; reconnect and baseline") as wrong_lease:
+        await f.collector.accept(
+            {**next_report, "lease": "b" * 64, "seq": source["seq"] + 1},
+            stale_now,
+            lease_proven_on_socket=True,
+        )
+    assert wrong_lease.value.status == 409
+
+    with pytest.raises(ProtocolError, match="Lease expired; reconnect and baseline") as wrong_identity:
+        await f.collector.accept(
+            {**next_report, "reporterId": f.identities[1]["reporterId"], "seq": source["seq"] + 1},
+            stale_now,
+            lease_proven_on_socket=True,
+        )
+    assert wrong_identity.value.status == 409
+
+    with pytest.raises(ProtocolError, match="Out-of-order or conflicting report") as wrong_sequence:
+        await f.collector.accept(
+            {**next_report, "seq": source["seq"] + 2},
+            stale_now,
+            lease_proven_on_socket=True,
+        )
+    assert wrong_sequence.value.status == 409
+
+    with pytest.raises(ProtocolError, match="Invalid report envelope") as invalid_report:
+        await f.collector.accept(
+            {**next_report, "seq": "3"},
+            stale_now,
+            lease_proven_on_socket=True,
+        )
+    assert invalid_report.value.status == 400
+
+    source["lastSeen"] = stale_now + 1
+    with pytest.raises(ProtocolError, match="Lease expired; reconnect and baseline"):
+        await f.collector.accept(
+            {**next_report, "seq": source["seq"] + 1},
+            stale_now,
+            lease_proven_on_socket=True,
+        )
+
+    source["lastSeen"] = stale_now
+    pairing = f.collector.pairings.pop(source["id"])
+    try:
+        with pytest.raises(ProtocolError, match="Lease expired; reconnect and baseline") as revoked:
+            await f.collector.accept(
+                {**next_report, "seq": source["seq"] + 1},
+                stale_now,
+                lease_proven_on_socket=True,
+            )
+        assert revoked.value.status == 409
+    finally:
+        f.collector.pairings[source["id"]] = pairing
 
 
 @pytest.mark.asyncio

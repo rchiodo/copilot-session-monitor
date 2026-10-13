@@ -45,8 +45,11 @@ __all__ = [
 ]
 
 VERSION = 1
-# Collector-side lease staleness window, in milliseconds. accept()/connect()
-# reject a reporter whose lastSeen is older than this as "Lease expired".
+# Collector-side lease staleness window, in milliseconds. connect() and a
+# report arriving on a socket that has not yet proven its lease reject a
+# reporter whose lastSeen is older than this as "Lease expired". A still-open
+# socket that already proved ownership of the same lease remains authoritative
+# even when report processing pauses longer than this freshness window.
 # reporter.send() can chain a connect() + two /v1/report attempts within a
 # single poll() cycle, each bounded by this module's own ~4s ClientTimeout
 # (see the matching comment on engine.GAP_THRESHOLD_MS), so transient

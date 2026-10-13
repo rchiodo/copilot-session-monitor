@@ -42,7 +42,7 @@ import pymonitor.server as server_module
 from pymonitor.actions import MonitorActions
 from pymonitor.collector import Collector
 from pymonitor.engine import Ledger
-from pymonitor.protocol import digest
+from pymonitor.protocol import HEARTBEAT_MS, digest
 from pymonitor.server import CollectorServer, _STATIC_ASSETS
 
 
@@ -400,6 +400,81 @@ async def _send(ws, route: str, body: dict[str, Any]) -> dict[str, Any]:
     message = await ws.receive_json()
     status = 200 if message.get("ok") else message.get("status", 400)
     return {"status": status, **message}
+
+
+def _report(reporter_id: str, lease: str, seq: int) -> dict[str, Any]:
+    sent_at = datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    return {
+        "version": 1, "reporterId": reporter_id, "lease": lease, "seq": seq,
+        "sentAt": sent_at, "healthy": True, "issues": [],
+        "members": [], "relatives": [], "notices": [],
+    }
+
+
+def _authorize_reporter(server: CollectorServer) -> tuple[str, dict[str, str]]:
+    reporter_id = server.config["reporters"][0]["id"]
+    token = "shared-secret"
+    server.config["reporters"][0]["tokenHash"] = digest(token)
+    server.collector.pairings[reporter_id]["tokenHash"] = digest(token)
+    return reporter_id, {"X-Monitor-Reporter": reporter_id, "Authorization": f"Bearer {token}"}
+
+
+async def test_successful_report_binds_existing_lease_to_new_socket(ingest) -> None:
+    server, client = ingest
+    reporter_id, headers = _authorize_reporter(server)
+    connected = await server.collector.connect({
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 1,
+    })
+
+    async with client.ws_connect("/v1/socket", headers=headers) as ws:
+        baseline = await _send(ws, "/v1/report", _report(reporter_id, connected["lease"], 1))
+        assert baseline["status"] == 200
+
+        server.collector.sources[reporter_id]["lastSeen"] = time.time() * 1000 - HEARTBEAT_MS - 1
+        late = await _send(ws, "/v1/report", _report(reporter_id, connected["lease"], 2))
+        assert late["status"] == 200
+
+
+async def test_new_socket_after_transport_loss_rejects_stale_persisted_lease(ingest) -> None:
+    server, client = ingest
+    reporter_id, headers = _authorize_reporter(server)
+    connect_payload = {
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 1,
+    }
+
+    async with client.ws_connect("/v1/socket", headers=headers) as old_ws:
+        connected = await _send(old_ws, "/v1/connect", connect_payload)
+        assert connected["status"] == 200
+        lease = connected["body"]["lease"]
+        baseline = await _send(old_ws, "/v1/report", _report(reporter_id, lease, 1))
+        assert baseline["status"] == 200
+
+    server.collector.sources[reporter_id]["lastSeen"] = time.time() * 1000 - HEARTBEAT_MS - 1
+
+    async with client.ws_connect("/v1/socket", headers=headers) as new_ws:
+        rejected = await _send(new_ws, "/v1/report", _report(reporter_id, lease, 2))
+        assert rejected["status"] == 409
+        assert rejected["error"] == "Lease expired; reconnect and baseline"
+
+
+async def test_successful_connect_binds_new_lease_to_socket(ingest) -> None:
+    server, client = ingest
+    reporter_id, headers = _authorize_reporter(server)
+    connect_payload = {
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 1,
+    }
+
+    async with client.ws_connect("/v1/socket", headers=headers) as ws:
+        connected = await _send(ws, "/v1/connect", connect_payload)
+        assert connected["status"] == 200
+        lease = connected["body"]["lease"]
+
+        server.collector.sources[reporter_id]["lastSeen"] = time.time() * 1000 - HEARTBEAT_MS - 1
+        accepted = await _send(ws, "/v1/report", _report(reporter_id, lease, 1))
+        assert accepted["status"] == 200
 
 
 async def test_self_healing_lease_expiration_stays_silent_across_reconnect(ingest, capsys) -> None:

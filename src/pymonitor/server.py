@@ -543,6 +543,7 @@ class CollectorServer:
         # a perfectly healthy existing connection.
         previous = self._reporter_sockets.get(id_)
         previous_closed = previous is None
+        proven_lease: str | None = None
 
         messages = ws.__aiter__()
         while True:
@@ -557,15 +558,28 @@ class CollectorServer:
 
             if message.type != WSMsgType.TEXT:
                 continue
+            accepted_lease: str | None = None
             try:
                 payload = json.loads(message.data)
                 route, value = payload["route"], payload["body"]
-                result = await self.actions.run(lambda route=route, value=value: self._ingest_body(route, id_, value))
+                lease_proven_on_socket = route == "/v1/report" and value.get("lease") == proven_lease
+                result = await self.actions.run(
+                    lambda route=route, value=value, lease_proven_on_socket=lease_proven_on_socket:
+                    self._ingest_body(
+                        route,
+                        id_,
+                        value,
+                        lease_proven_on_socket=lease_proven_on_socket,
+                    ),
+                )
                 if route == "/v1/report":
                     # See the matching comment this mirrors in the old
                     # _handle_ingest: only a genuinely accepted report counts
                     # as recovery for console-spam dedup purposes.
                     self._last_reject_error.pop(id_, None)
+                    accepted_lease = value["lease"]
+                elif route == "/v1/connect":
+                    accepted_lease = result["lease"]
                 reply = {"ok": True, "body": result}
             except ProtocolError as error:
                 if error.status != 409 or str(error) != "Lease expired; reconnect and baseline":
@@ -586,11 +600,13 @@ class CollectorServer:
                 # redial and open a fresh one.
                 break
 
-            if not previous_closed:
-                if previous is not None and previous is not ws and not previous.closed:
-                    await previous.close()
-                previous_closed = True
-            self._reporter_sockets[id_] = ws
+            if accepted_lease is not None:
+                proven_lease = accepted_lease
+                if not previous_closed:
+                    if previous is not None and previous is not ws and not previous.closed:
+                        await previous.close()
+                    previous_closed = True
+                self._reporter_sockets[id_] = ws
 
         if self._reporter_sockets.get(id_) is ws:
             del self._reporter_sockets[id_]
@@ -608,7 +624,14 @@ class CollectorServer:
         self._last_reject_error[key] = message
         print(message)
 
-    async def _ingest_body(self, route: str, id_: str, value: dict[str, Any]) -> dict[str, Any]:
+    async def _ingest_body(
+        self,
+        route: str,
+        id_: str,
+        value: dict[str, Any],
+        *,
+        lease_proven_on_socket: bool = False,
+    ) -> dict[str, Any]:
         await self._refresh_configuration()
         if id_ not in self.collector.pairings:
             raise fail("Reporter revoked", 403)
@@ -620,7 +643,7 @@ class CollectorServer:
             raise fail("Reporter identity mismatch", 403)
         if route == "/v1/connect":
             return await self.collector.connect(value)
-        return await self.collector.accept(value)
+        return await self.collector.accept(value, lease_proven_on_socket=lease_proven_on_socket)
 
     # -- tray-bridge event hooks (Phase 3 seam) ------------------------------
 
