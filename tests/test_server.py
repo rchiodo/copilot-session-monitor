@@ -30,6 +30,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -365,13 +366,7 @@ async def test_stream_broadcasts_after_dismiss(dashboard) -> None:
     stream_resp.close()
 
 
-# -- /v1/* ingestion dedup ---------------------------------------------------
-#
-# Regression test for the console-spam bug: a bare `/v1/connect` success
-# must NOT clear `_last_reject_error`'s dedup state. Only a genuinely
-# accepted `/v1/report` should. Otherwise the reporter's retry-on-409 path
-# (connect, then retry report) perpetually wipes dedup right before an
-# identical report failure recurs, printing the same rejection every poll.
+# -- /v1/* ingestion ---------------------------------------------------------
 
 
 def _build_ingest_app(server: CollectorServer) -> web.Application:
@@ -407,7 +402,7 @@ async def _send(ws, route: str, body: dict[str, Any]) -> dict[str, Any]:
     return {"status": status, **message}
 
 
-async def test_connect_success_does_not_clear_report_rejection_dedup(ingest, capsys) -> None:
+async def test_self_healing_lease_expiration_stays_silent_across_reconnect(ingest, capsys) -> None:
     server, client = ingest
     reporter_id = server.config["reporters"][0]["id"]
     token = "shared-secret"
@@ -429,9 +424,9 @@ async def test_connect_success_does_not_clear_report_rejection_dedup(ingest, cap
         capsys.readouterr()
         first = await _send(ws, "/v1/report", bad_report)
         assert first["status"] == 409
-        assert capsys.readouterr().out.count("Lease expired") == 1
+        assert capsys.readouterr().out == ""
 
-        # Repeating the identical failure must stay deduped (no new print).
+        # Repeating this expected self-healing failure must also stay silent.
         again = await _send(ws, "/v1/report", bad_report)
         assert again["status"] == 409
         assert capsys.readouterr().out == ""
@@ -442,14 +437,18 @@ async def test_connect_success_does_not_clear_report_rejection_dedup(ingest, cap
         }
         connected = await _send(ws, "/v1/connect", connect_payload)
         assert connected["status"] == 200
-        # The bug: a bare connect success must not print anything, nor clear dedup.
+        # Reconnecting is part of Reporter.send's automatic recovery.
         assert capsys.readouterr().out == ""
 
-        # The retried report (still using the stale lease) fails identically --
-        # this must remain suppressed, not print again.
+        # The retried report still uses the stale lease in this synthetic case,
+        # and the exact self-healing rejection remains silent.
         retried = await _send(ws, "/v1/report", bad_report)
         assert retried["status"] == 409
         assert capsys.readouterr().out == ""
+
+        rejected = await _send(ws, "/v1/report", {**bad_report, "reporterId": str(uuid.uuid4())})
+        assert rejected["status"] == 403
+        assert "Reporter identity mismatch" in capsys.readouterr().out
 
 
 async def test_reconnect_closes_previous_socket_only_after_new_one_proves_itself(ingest) -> None:
@@ -531,6 +530,41 @@ async def test_socket_send_failure_on_disconnect_does_not_crash_handler(ingest, 
         assert message.type in (WSMsgType.CLOSE, WSMsgType.CLOSING, WSMsgType.CLOSED, WSMsgType.ERROR)
 
     assert "Reporter request rejected" not in capsys.readouterr().out
+
+
+async def test_socket_receive_reset_does_not_escape_but_application_errors_do(ingest, monkeypatch) -> None:
+    server, _client = ingest
+    reporter_id = server.config["reporters"][0]["id"]
+    token = "shared-secret"
+    server.config["reporters"][0]["tokenHash"] = digest(token)
+    server.collector.pairings[reporter_id]["tokenHash"] = digest(token)
+    request = SimpleNamespace(
+        headers={"X-Monitor-Reporter": reporter_id, "Authorization": "Bearer " + token},
+    )
+
+    class _FailingWebSocketResponse:
+        error: Exception = ConnectionResetError("Cannot write to closing transport")
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def prepare(self, _request):
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise self.error
+
+    monkeypatch.setattr(web, "WebSocketResponse", _FailingWebSocketResponse)
+
+    response = await server._handle_socket(request)
+    assert isinstance(response, _FailingWebSocketResponse)
+
+    _FailingWebSocketResponse.error = RuntimeError("application failure")
+    with pytest.raises(RuntimeError, match="application failure"):
+        await server._handle_socket(request)
 
 
 

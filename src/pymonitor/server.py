@@ -544,7 +544,17 @@ class CollectorServer:
         previous = self._reporter_sockets.get(id_)
         previous_closed = previous is None
 
-        async for message in ws:
+        messages = ws.__aiter__()
+        while True:
+            try:
+                message = await anext(messages)
+            except StopAsyncIteration:
+                break
+            except ConnectionResetError:
+                # aiohttp may auto-pong while advancing the iterator after the
+                # peer's transport has already closed. This is a normal disconnect.
+                break
+
             if message.type != WSMsgType.TEXT:
                 continue
             try:
@@ -558,7 +568,8 @@ class CollectorServer:
                     self._last_reject_error.pop(id_, None)
                 reply = {"ok": True, "body": result}
             except ProtocolError as error:
-                self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
+                if error.status != 409 or str(error) != "Lease expired; reconnect and baseline":
+                    self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
                 reply = {"ok": False, "status": error.status, "error": str(error)}
             except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
                 self._log_rejection(id_, f"Reporter request rejected ({error})")
