@@ -583,7 +583,11 @@ class CollectorServer:
         if not pairing or not authorized(request.headers.get("Authorization"), pairing["tokenHash"]):
             return web.json_response({"error": "Reporter authentication required"}, status=403)
 
-        ws = web.WebSocketResponse(heartbeat=10, max_msg_size=MAX_BYTES)
+        # Application reports and the client's per-request response timeout
+        # provide liveness. Do not enable aiohttp heartbeat timers: the
+        # request/response peer may not be receiving while it observes local
+        # state. Default autoping remains enabled for control frames received.
+        ws = web.WebSocketResponse(max_msg_size=MAX_BYTES)
         await ws.prepare(request)
         self._next_socket_id += 1
         socket_id = f"ws-{self._next_socket_id}"

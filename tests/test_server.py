@@ -463,6 +463,42 @@ async def test_successful_report_binds_existing_lease_to_new_socket(ingest) -> N
         assert late["status"] == 200
 
 
+async def test_socket_disables_transport_heartbeat_but_keeps_default_autoping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    server = await _make_server(tmp_path)
+    server.config["id"] = "test-instance"
+    server.config["bindAddress"] = "127.0.0.1"
+    server.config["port"] = 0
+    monkeypatch.setattr(server_module, "load_collector", AsyncMock(return_value=server.config))
+    reporter_id, headers = _authorize_reporter(server)
+    websocket_kwargs = None
+
+    class _RecordingWebSocketResponse:
+        def __init__(self, **kwargs) -> None:
+            nonlocal websocket_kwargs
+            websocket_kwargs = kwargs
+
+        async def prepare(self, _request) -> None:
+            pass
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    monkeypatch.setattr(web, "WebSocketResponse", _RecordingWebSocketResponse)
+    request = SimpleNamespace(headers=headers)
+
+    response = await server._handle_socket(request)
+
+    assert isinstance(response, _RecordingWebSocketResponse)
+    assert websocket_kwargs is not None
+    assert "heartbeat" not in websocket_kwargs
+    assert "autoping" not in websocket_kwargs
+
+
 async def test_new_socket_after_transport_loss_rejects_stale_persisted_lease(ingest) -> None:
     server, client = ingest
     reporter_id, headers = _authorize_reporter(server)

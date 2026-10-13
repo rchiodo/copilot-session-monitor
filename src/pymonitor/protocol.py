@@ -45,17 +45,12 @@ __all__ = [
 ]
 
 VERSION = 1
-# Collector-side lease staleness window, in milliseconds. connect() and a
-# report arriving on a socket that has not yet proven its lease reject a
-# reporter whose lastSeen is older than this as "Lease expired". A still-open
-# socket that already proved ownership of the same lease remains authoritative
-# even when report processing pauses longer than this freshness window.
-# reporter.send() can chain a connect() + two /v1/report attempts within a
-# single poll() cycle, each bounded by this module's own ~4s ClientTimeout
-# (see the matching comment on engine.GAP_THRESHOLD_MS), so transient
-# network flakiness can approach ~12-16s even when nothing is truly stalled.
-# Keep real margin above that worst case so retries don't repeatedly trip a
-# fresh lease-expiry 409 on an already-recovering connection.
+# Collector-side application-report staleness window, in milliseconds; this
+# is unrelated to WebSocket transport heartbeat timers. connect() and a report
+# arriving on a socket that has not yet proven its lease reject a reporter
+# whose lastSeen is older than this as "Lease expired". A still-open socket
+# that already proved ownership of the same lease remains authoritative even
+# when report processing pauses longer than this freshness window.
 HEARTBEAT_MS = 25000
 MAX_BYTES = 4 * 1024 * 1024
 TITLE_MAX_CHARS = 512
@@ -595,8 +590,13 @@ class ReporterConnection:
         connector = _PinCapturingConnector(ssl=ssl_context)
         session = aiohttp.ClientSession(connector=connector)
         try:
+            # Deliberately rely on application reports plus the per-request
+            # response timeout for liveness. aiohttp heartbeat timers require
+            # receive() to run continuously, but this request/response client
+            # may be locally observing between requests. Keep default autoping
+            # so control frames encountered during receive are still handled.
             ws = await session.ws_connect(
-                url, headers=headers, ssl=ssl_context, heartbeat=10, max_msg_size=MAX_BYTES,
+                url, headers=headers, ssl=ssl_context, max_msg_size=MAX_BYTES,
             )
         except Exception as error:
             await session.close()

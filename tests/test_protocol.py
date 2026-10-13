@@ -380,7 +380,7 @@ async def test_request_rejects_real_tls_server_with_different_cert(tmp_path) -> 
 
 
 async def _echo_ws(request: web.Request) -> web.WebSocketResponse:
-    ws = web.WebSocketResponse(heartbeat=10)
+    ws = web.WebSocketResponse()
     await ws.prepare(request)
     async for message in ws:
         if message.type != WSMsgType.TEXT:
@@ -426,6 +426,42 @@ async def test_reporter_connection_succeeds_against_real_tls_ws_server_with_matc
     finally:
         await conn.close()
         await runner.cleanup()
+
+
+async def test_reporter_connection_disables_transport_heartbeat_but_keeps_default_autoping(monkeypatch) -> None:
+    cert_pem, _key_pem = _self_signed_cert_and_key()
+    expected_der = proto._cert_der(cert_pem)
+    ws_connect_kwargs = None
+
+    class _FakeWebSocket:
+        closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    fake_ws = _FakeWebSocket()
+
+    class _FakeClientSession:
+        def __init__(self, *, connector) -> None:
+            connector.captured_peer_der = expected_der
+
+        async def ws_connect(self, _url, **kwargs):
+            nonlocal ws_connect_kwargs
+            ws_connect_kwargs = kwargs
+            return fake_ws
+
+        async def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(proto.aiohttp, "ClientSession", _FakeClientSession)
+    conn = proto.ReporterConnection(_pairing_for(cert_pem, 43188))
+    try:
+        assert await conn._ensure_connected() is fake_ws
+        assert ws_connect_kwargs is not None
+        assert "heartbeat" not in ws_connect_kwargs
+        assert "autoping" not in ws_connect_kwargs
+    finally:
+        await conn.close()
 
 
 async def test_reporter_connection_reuses_socket_across_requests(tmp_path) -> None:
