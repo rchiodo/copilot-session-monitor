@@ -24,7 +24,7 @@ import datetime
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -36,6 +36,7 @@ from cryptography.x509.oid import NameOID
 from pymonitor import configuration as cfg
 from pymonitor import watcher as watcher_mod
 from pymonitor.protocol import VERSION, encode_connection_string
+from pymonitor.reporter import ReporterRecoveryError
 from pymonitor.watcher import Watcher
 
 
@@ -295,6 +296,93 @@ async def test_status_returns_health_and_pairing_state(control) -> None:
     assert body["instanceId"] == w.identity["bootId"]
     assert body["paired"] is False
     assert body["reporterId"] is None
+
+
+async def test_status_returns_bounded_local_recovery_diagnostics(control) -> None:
+    w, client = control
+    w.reporter = MagicMock()
+    w.reporter.recovery_diagnostics.return_value = [{
+        "at": "2026-10-13T17:55:00Z",
+        "recoveryId": "r0004",
+        "initialReport": {"outcome": "failed", "status": 409, "reason": "lease-expired"},
+        "reconnect": {"outcome": "accepted", "status": None, "reason": None},
+        "baselineRetry": {"outcome": "failed", "status": 409, "reason": "lease-expired"},
+    }]
+
+    resp = await client.request("GET", "/status")
+    body = await resp.json()
+
+    assert body["diagnostics"]["recentRecoveryAttempts"][0]["recoveryId"] == "r0004"
+    assert "lease" not in body["diagnostics"]["recentRecoveryAttempts"][0]
+
+
+async def test_failed_recovery_ids_update_status_without_console_spam(tmp_path: Path, capsys: Any) -> None:
+    pairing = _pairing()
+    (cfg.data_dir / "watcher.json").write_text(json.dumps(pairing), encoding="utf-8")
+    w = await _started(tmp_path)
+    try:
+        w._timer_task.cancel()
+        w._timer_task = None
+        w._polling = False
+        w.reporter.lease = "a" * 64
+        w.monitor = MagicMock(relatives=[], observed={})
+        assert not w._stopping
+        assert w.reporter
+
+        def recovery_error(recovery_id: str, *, reconnect_failed: bool = False) -> ReporterRecoveryError:
+            attempt = {
+                "at": "2026-10-13T17:55:00Z",
+                "recoveryId": recovery_id,
+                "initialReport": {
+                    "outcome": "failed", "at": "2026-10-13T17:55:00Z",
+                    "status": 409, "reason": "lease-expired",
+                },
+                "reconnect": {
+                    "outcome": "failed" if reconnect_failed else "accepted",
+                    "at": "2026-10-13T17:55:01Z",
+                    "status": 409 if reconnect_failed else None,
+                    "reason": "active-boot-conflict" if reconnect_failed else None,
+                },
+                "baselineRetry": {
+                    "outcome": "not-attempted" if reconnect_failed else "failed",
+                    "at": "2026-10-13T17:55:02Z",
+                    "status": None if reconnect_failed else 409,
+                    "reason": None if reconnect_failed else "lease-expired",
+                },
+            }
+            return ReporterRecoveryError(
+                attempt,
+                watcher_mod.ProtocolError(
+                    "Another watcher instance holds this identity"
+                    if reconnect_failed
+                    else "Lease expired; reconnect and baseline",
+                    409,
+                ),
+            )
+
+        w.reporter.send.side_effect = [
+            recovery_error("r0001"),
+            {"healthy": True},
+            recovery_error("r0003"),
+            recovery_error("r0004", reconnect_failed=True),
+        ]
+        send_count = w.reporter.send.await_count
+        capsys.readouterr()
+
+        await w.poll()
+        await w.poll()
+        await w.poll()
+        await w.poll()
+
+        assert w.reporter.send.await_count == send_count + 4
+        out = capsys.readouterr().out
+        assert out.count("Collector recovery") == 2
+        assert "r0001" in out
+        assert "r0003" not in out
+        assert "r0004" in out
+        assert "r0004" in w.health["issue"]
+    finally:
+        await w.stop()
 
 
 async def test_connect_rejects_missing_or_wrong_bearer_token(control) -> None:

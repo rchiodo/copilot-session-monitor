@@ -22,7 +22,7 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 from pymonitor import protocol as proto
-from pymonitor.reporter import Reporter
+from pymonitor.reporter import Reporter, ReporterRecoveryError
 
 
 def _uuid(n: int) -> str:
@@ -160,6 +160,16 @@ async def test_send_retries_once_on_409_via_reconnect(reporter: Reporter) -> Non
     final_body = reporter._conn.request.await_args_list[-1].args[1]
     assert final_body["lease"] == new_lease
     assert final_body["seq"] == 1
+    diagnostics = reporter.recovery_diagnostics()
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["recoveryId"] == "r0001"
+    assert diagnostics[0]["initialReport"]["outcome"] == "failed"
+    assert diagnostics[0]["initialReport"]["status"] == 409
+    assert diagnostics[0]["reconnect"]["outcome"] == "accepted"
+    assert diagnostics[0]["baselineRetry"]["outcome"] == "accepted"
+    serialized = str(diagnostics)
+    assert "a" * 64 not in serialized
+    assert "b" * 64 not in serialized
 
 
 async def test_send_409_retry_failure_propagates(reporter: Reporter) -> None:
@@ -168,11 +178,48 @@ async def test_send_409_retry_failure_propagates(reporter: Reporter) -> None:
     error_connect = proto.ProtocolError("Another watcher instance holds this identity", 409)
     reporter._conn.request.side_effect = [error_report, error_connect]
 
-    with pytest.raises(proto.ProtocolError, match="Another watcher instance"):
+    with pytest.raises(ReporterRecoveryError, match=r"recovery r0001 failed.*reconnect=failed/409/protocol-error") as caught:
         await reporter.send(_snapshot())
 
     assert reporter._conn.request.await_count == 2
     assert reporter.lease is None, "lease must be dropped on any send failure"
+    assert "Another watcher instance" in str(caught.value)
+    diagnostics = reporter.recovery_diagnostics()
+    assert diagnostics[0]["baselineRetry"]["outcome"] == "not-attempted"
+
+
+async def test_send_409_baseline_retry_failure_has_phase_context(reporter: Reporter) -> None:
+    reporter.lease = "a" * 64
+    error_report = proto.ProtocolError("Lease expired; reconnect and baseline", 409)
+    error_retry = proto.ProtocolError("Lease expired; reconnect and baseline", 409)
+    reporter._conn.request.side_effect = [
+        error_report,
+        {"version": proto.VERSION, "lease": "b" * 64},
+        error_retry,
+    ]
+
+    with pytest.raises(ReporterRecoveryError) as caught:
+        await reporter.send(_snapshot())
+
+    assert "initial-report=failed/409/lease-expired" in str(caught.value)
+    assert "reconnect=accepted" in str(caught.value)
+    assert "baseline-retry=failed/409/lease-expired" in str(caught.value)
+    assert caught.value.recovery_id == "r0001"
+    assert caught.value.dedup_key == (
+        "initialReport:failed:409:lease-expired;"
+        "reconnect:accepted:None:None;"
+        "baselineRetry:failed:409:lease-expired"
+    )
+
+
+async def test_recovery_history_is_bounded(reporter: Reporter) -> None:
+    for _ in range(20):
+        reporter._start_recovery(proto.ProtocolError("Lease expired; reconnect and baseline", 409))
+
+    diagnostics = reporter.recovery_diagnostics()
+    assert len(diagnostics) == 12
+    assert diagnostics[0]["recoveryId"] == "r0009"
+    assert diagnostics[-1]["recoveryId"] == "r0020"
 
 
 async def test_send_does_not_retry_non_retryable_errors(reporter: Reporter) -> None:

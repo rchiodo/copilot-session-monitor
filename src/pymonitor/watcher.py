@@ -72,6 +72,7 @@ class Watcher:
         self._stopping = False
         self._polling = False
         self._last_error: str | None = None
+        self._last_recovery_error: str | None = None
         self._release: Callable[[], Awaitable[None]] | None = None
         self.app = web.Application(middlewares=[self._same_origin])
         self.control_token = secrets.token_hex(32)
@@ -177,9 +178,15 @@ class Watcher:
             message = error.args[0] if isinstance(error, ProtocolError) and error.args else None
             issue = message or f"Reporting unavailable ({type(error).__name__})"
             self.health = {**self.health, "healthy": False, "issue": issue}
-            if self.health["issue"] != self._last_error:
-                print(self.health["issue"])
-            self._last_error = self.health["issue"]
+            recovery_key = getattr(error, "dedup_key", None)
+            if recovery_key is not None:
+                if recovery_key != self._last_recovery_error:
+                    print(self.health["issue"])
+                self._last_recovery_error = recovery_key
+            else:
+                if self.health["issue"] != self._last_error:
+                    print(self.health["issue"])
+                self._last_error = self.health["issue"]
         finally:
             self._polling = False
         if self.bridge:
@@ -205,6 +212,8 @@ class Watcher:
         self.monitor = observer["monitor"]
         self.source = observer["source"]
         self._notices = []
+        self._last_error = None
+        self._last_recovery_error = None
         self.health = {"healthy": False, "issue": "Starting watcher", "lastAcknowledgedAt": None}
 
         async def _loop() -> None:
@@ -248,6 +257,9 @@ class Watcher:
             "instanceId": self.identity["bootId"] if self.identity else None,
             "reporterId": (self.pairing or {}).get("reporterId"),
             "paired": bool(self.pairing),
+            "diagnostics": {
+                "recentRecoveryAttempts": self.reporter.recovery_diagnostics() if self.reporter else [],
+            },
         })
 
     async def _handle_connect(self, request: web.Request) -> web.Response:

@@ -281,6 +281,18 @@ class CollectorConsoleBridge:
                 f"- {source['label']}: healthy={source['healthy']}, "
                 f"lastSeen={last_seen}, issue={issue}"
             )
+        events = snapshot.get("diagnostics", {}).get("recentReporterEvents", [])
+        if events:
+            print("Recent reporter diagnostics:")
+            for event in events[-10:]:
+                print(
+                    f"  {event['at']} {event['reporterLabel']}[{event['reporterIdPrefix']}] "
+                    f"{event['socketId']} {event['route']}:{event['stage']} "
+                    f"{event['outcome']} reason={event.get('reason') or '-'} "
+                    f"registered={event['socketRegistered']} current={event['socketCurrent']} "
+                    f"proven={event['leaseProven']} gen={event.get('generation')} "
+                    f"boot={event.get('bootIdPrefix') or '-'}"
+                )
 
     async def _status_snapshot(self) -> dict[str, Any]:
         return self._server.status()
@@ -457,6 +469,21 @@ class WatcherConsoleBridge:
             f"Paired as '{self._watcher.pairing.get('label')}': "
             f"healthy={health.get('healthy')}, issue={health.get('issue')}"
         )
+        attempts = self._watcher.reporter.recovery_diagnostics() if self._watcher.reporter else []
+        if attempts:
+            print("Recent recovery diagnostics:")
+            for attempt in attempts[-5:]:
+                phases = ", ".join(
+                    f"{label}={attempt[key]['outcome']}"
+                    + (f"/{attempt[key]['status']}" if attempt[key].get("status") is not None else "")
+                    + (f"/{attempt[key]['reason']}" if attempt[key].get("reason") else "")
+                    for key, label in (
+                        ("initialReport", "initial-report"),
+                        ("reconnect", "reconnect"),
+                        ("baselineRetry", "baseline-retry"),
+                    )
+                )
+                print(f"  {attempt['at']} {attempt['recoveryId']}: {phases}")
 
     def _cmd_stop(self) -> None:
         assert self._loop is not None

@@ -28,6 +28,7 @@ import socket
 import ssl
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol
 
@@ -69,6 +70,8 @@ _SECURITY_HEADERS = {
         "frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
     ),
 }
+_REPORTER_EVENT_LIMIT = 24
+_STATUS_EVENT_LIMIT = 80
 
 
 def _shorten(value: Any, length: int) -> str:
@@ -125,6 +128,9 @@ class CollectorServer:
         self._sse_clients: set[web.StreamResponse] = set()
         self._last_reject_error: dict[str, str] = {}
         self._reporter_sockets: dict[str, web.WebSocketResponse] = {}
+        self._reporter_socket_ids: dict[str, str] = {}
+        self._reporter_events: dict[str, deque[dict[str, Any]]] = {}
+        self._next_socket_id = 0
         self.local_reporter_id: str | None = None
         self.processes: dict[str, Any] | None = None
         self.local_reset: str | None = None
@@ -250,7 +256,51 @@ class CollectorServer:
             "healthy": self.bridge_ready and not self.fault,
             "source": "Authenticated metadata reports from paired Windows watchers",
             "updatedAt": _iso(), "notification": self.notification, "theme": theme,
+            "diagnostics": {"recentReporterEvents": self._recent_reporter_events()},
         }
+
+    def _recent_reporter_events(self) -> list[dict[str, Any]]:
+        events = [event for history in self._reporter_events.values() for event in history]
+        return sorted(events, key=lambda event: event["at"])[-_STATUS_EVENT_LIMIT:]
+
+    def _record_reporter_event(
+        self,
+        reporter_id: str,
+        socket_id: str,
+        ws: web.WebSocketResponse,
+        *,
+        route: str,
+        stage: str,
+        outcome: str,
+        reason: str | None = None,
+        lease_proven: bool = False,
+        value: dict[str, Any] | None = None,
+    ) -> None:
+        pairing = self.collector.pairings.get(reporter_id)
+        source = self.collector.sources.get(reporter_id)
+        safe_value = value if isinstance(value, dict) else {}
+        generation = safe_value.get("generation")
+        boot_id = safe_value.get("bootId")
+        if generation is None and source:
+            generation = source.get("generation")
+        if boot_id is None and source:
+            boot_id = source.get("bootId")
+        event = {
+            "at": _iso(),
+            "reporterLabel": (pairing or source or {}).get("label") or "unknown",
+            "reporterIdPrefix": reporter_id[:8],
+            "socketId": socket_id,
+            "route": route if route in ("socket", "/v1/connect", "/v1/report", "/v1/disconnect") else "unknown",
+            "stage": stage,
+            "outcome": outcome,
+            "reason": reason,
+            "socketRegistered": reporter_id in self._reporter_sockets,
+            "socketCurrent": self._reporter_sockets.get(reporter_id) is ws,
+            "leaseProven": bool(lease_proven),
+            "generation": generation if isinstance(generation, int) and not isinstance(generation, bool) else None,
+            "bootIdPrefix": boot_id[:8] if isinstance(boot_id, str) else None,
+        }
+        self._reporter_events.setdefault(reporter_id, deque(maxlen=_REPORTER_EVENT_LIMIT)).append(event)
 
     # -- lifecycle ------------------------------------------------------------
 
@@ -535,6 +585,8 @@ class CollectorServer:
 
         ws = web.WebSocketResponse(heartbeat=10, max_msg_size=MAX_BYTES)
         await ws.prepare(request)
+        self._next_socket_id += 1
+        socket_id = f"ws-{self._next_socket_id}"
 
         # A reconnecting reporter (e.g. after a redial following a transport
         # failure) may still have its old socket registered. Defer closing it
@@ -542,8 +594,14 @@ class CollectorServer:
         # so a reporter that opens a socket but never speaks doesn't tear down
         # a perfectly healthy existing connection.
         previous = self._reporter_sockets.get(id_)
+        previous_socket_id = self._reporter_socket_ids.get(id_)
         previous_closed = previous is None
         proven_lease: str | None = None
+        close_reason = "peer-closed"
+        self._record_reporter_event(
+            id_, socket_id, ws,
+            route="socket", stage="open", outcome="opened",
+        )
 
         messages = ws.__aiter__()
         while True:
@@ -554,15 +612,24 @@ class CollectorServer:
             except ConnectionResetError:
                 # aiohttp may auto-pong while advancing the iterator after the
                 # peer's transport has already closed. This is a normal disconnect.
+                close_reason = "connection-reset"
                 break
 
             if message.type != WSMsgType.TEXT:
                 continue
             accepted_lease: str | None = None
+            route = "unknown"
+            value: dict[str, Any] = {}
+            lease_proven_on_socket = False
             try:
                 payload = json.loads(message.data)
                 route, value = payload["route"], payload["body"]
                 lease_proven_on_socket = route == "/v1/report" and value.get("lease") == proven_lease
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="received", outcome="pending",
+                    lease_proven=lease_proven_on_socket, value=value,
+                )
                 result = await self.actions.run(
                     lambda route=route, value=value, lease_proven_on_socket=lease_proven_on_socket:
                     self._ingest_body(
@@ -580,12 +647,28 @@ class CollectorServer:
                     accepted_lease = value["lease"]
                 elif route == "/v1/connect":
                     accepted_lease = result["lease"]
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="action-complete", outcome="accepted",
+                    lease_proven=lease_proven_on_socket, value=value,
+                )
                 reply = {"ok": True, "body": result}
             except ProtocolError as error:
+                reason = error.reason or f"protocol-{error.status}"
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="action-complete", outcome="rejected",
+                    reason=reason, lease_proven=lease_proven_on_socket, value=value,
+                )
                 if error.status != 409 or str(error) != "Lease expired; reconnect and baseline":
                     self._log_rejection(id_, f"Reporter request rejected ({error.status}): {error}")
                 reply = {"ok": False, "status": error.status, "error": str(error)}
             except Exception as error:  # noqa: BLE001 -- mirrors JS catch-all; any failure is a 503 persistence/config error.
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="action-complete", outcome="failed",
+                    reason=type(error).__name__, lease_proven=lease_proven_on_socket, value=value,
+                )
                 self._log_rejection(id_, f"Reporter request rejected ({error})")
                 reply = {"ok": False, "status": 503, "error": "Collector persistence/configuration unavailable"}
 
@@ -598,18 +681,41 @@ class CollectorServer:
                 # point retrying the send on a transport that's already
                 # gone. Stop servicing this socket; the reporter will
                 # redial and open a fresh one.
+                close_reason = "reply-transport-closed"
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="reply", outcome="failed",
+                    reason=close_reason, lease_proven=lease_proven_on_socket, value=value,
+                )
                 break
 
             if accepted_lease is not None:
                 proven_lease = accepted_lease
                 if not previous_closed:
                     if previous is not None and previous is not ws and not previous.closed:
+                        self._record_reporter_event(
+                            id_, previous_socket_id or "unknown", previous,
+                            route="socket", stage="close-requested", outcome="superseded",
+                            reason=f"replaced-by-{socket_id}",
+                        )
                         await previous.close()
                     previous_closed = True
                 self._reporter_sockets[id_] = ws
+                self._reporter_socket_ids[id_] = socket_id
+                self._record_reporter_event(
+                    id_, socket_id, ws,
+                    route=route, stage="registered", outcome="current",
+                    lease_proven=True, value=value,
+                )
 
+        self._record_reporter_event(
+            id_, socket_id, ws,
+            route="socket", stage="close", outcome="closed", reason=close_reason,
+            lease_proven=proven_lease is not None,
+        )
         if self._reporter_sockets.get(id_) is ws:
             del self._reporter_sockets[id_]
+            self._reporter_socket_ids.pop(id_, None)
         return ws
 
     def _log_rejection(self, reporter_id: str | None, message: str) -> None:

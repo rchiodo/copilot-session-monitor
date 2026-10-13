@@ -249,6 +249,58 @@ async def test_proven_socket_bypasses_only_stale_lease_age(fixture: Fixture) -> 
         f.collector.pairings[source["id"]] = pairing
 
 
+@pytest.mark.parametrize(
+    ("mode", "reason"),
+    [
+        ("source-missing", "source-missing"),
+        ("pairing-revoked", "pairing-revoked"),
+        ("lease-mismatch", "lease-mismatch"),
+        ("clock-backward", "clock-backward"),
+        ("stale-unproven-socket", "stale-unproven-socket"),
+    ],
+)
+async def test_lease_expired_internal_reason_preserves_external_error(
+    tmp_path: Path,
+    mode: str,
+    reason: str,
+) -> None:
+    f = await make_fixture(tmp_path / mode)
+    identity = f.identities[0]
+    report = {
+        "version": 1,
+        "reporterId": identity["reporterId"],
+        "lease": "a" * 64,
+        "seq": 1,
+        "sentAt": AT,
+        "healthy": True,
+        "issues": [],
+        "notices": [],
+        **metadata({"members": []}),
+    }
+    now = NOW
+    if mode != "source-missing":
+        connected = await f.connect()
+        report["lease"] = connected["lease"]
+        source = f.collector.sources[identity["reporterId"]]
+        if mode == "pairing-revoked":
+            f.collector.pairings.pop(identity["reporterId"])
+        elif mode == "lease-mismatch":
+            report["lease"] = "b" * 64
+        elif mode == "clock-backward":
+            now = source["lastSeen"] - 1
+            report["sentAt"] = datetime.fromtimestamp(now / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+        elif mode == "stale-unproven-socket":
+            now = source["lastSeen"] + HEARTBEAT_MS
+            report["sentAt"] = datetime.fromtimestamp(now / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+    with pytest.raises(ProtocolError) as caught:
+        await f.collector.accept(report, now)
+
+    assert caught.value.status == 409
+    assert str(caught.value) == "Lease expired; reconnect and baseline"
+    assert caught.value.reason == reason
+
+
 @pytest.mark.asyncio
 async def test_retained_finish_trusted_but_baseline_distrusts(fixture: Fixture) -> None:
     f = fixture

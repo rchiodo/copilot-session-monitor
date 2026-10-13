@@ -84,13 +84,14 @@ _KINDS = ["finished", "waiting", "error", "warning"]
 class ProtocolError(Exception):
     """Mirrors the JS `Object.assign(new Error(message), { status })` pattern."""
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    def __init__(self, message: str, status: int = 400, *, reason: str | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.reason = reason
 
 
-def fail(message: str, status: int = 400) -> ProtocolError:
-    return ProtocolError(message, status)
+def fail(message: str, status: int = 400, *, reason: str | None = None) -> ProtocolError:
+    return ProtocolError(message, status, reason=reason)
 
 
 def _is_int(value: Any) -> bool:

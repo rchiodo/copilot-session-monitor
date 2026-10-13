@@ -262,20 +262,20 @@ class Collector:
         validate_connect(value)
         pairing = self.pairings.get(value["reporterId"])
         if not pairing:
-            raise fail("Reporter not paired", 403)
+            raise fail("Reporter not paired", 403, reason="reporter-not-paired")
         source = self.sources.get(value["reporterId"])
         if source and source.get("installationId") and source["installationId"] != value["installationId"]:
-            raise fail("Reporter installation identity conflict", 409)
+            raise fail("Reporter installation identity conflict", 409, reason="installation-conflict")
         if source and (
             value["generation"] < source["generation"]
             or (value["generation"] == source["generation"] and source["bootId"] != value["bootId"])
         ):
-            raise fail("Old watcher generation", 409)
+            raise fail("Old watcher generation", 409, reason="old-generation")
         if (
             source and source.get("lease") and source["bootId"] != value["bootId"]
             and now - source["lastSeen"] >= 0 and now - source["lastSeen"] < HEARTBEAT_MS
         ):
-            raise fail("Another watcher instance holds this identity", 409)
+            raise fail("Another watcher instance holds this identity", 409, reason="active-boot-conflict")
         new_source = {
             **(source or {}),
             "id": pairing["id"], "label": pairing["label"], "installationId": value["installationId"],
@@ -308,12 +308,23 @@ class Collector:
             now = time.time() * 1000
         validate_report(value)
         source = self.sources.get(value["reporterId"])
-        if (
-            not source or source["id"] not in self.pairings or source.get("lease") != value["lease"]
-            or now - source["lastSeen"] < 0
-            or (not lease_proven_on_socket and now - source["lastSeen"] >= HEARTBEAT_MS)
-        ):
-            raise fail("Lease expired; reconnect and baseline", 409)
+        lease_rejection = None
+        if not source:
+            lease_rejection = "source-missing"
+        elif source["id"] not in self.pairings:
+            lease_rejection = "pairing-revoked"
+        elif source.get("lease") != value["lease"]:
+            lease_rejection = "lease-mismatch"
+        elif now - source["lastSeen"] < 0:
+            lease_rejection = "clock-backward"
+        elif not lease_proven_on_socket and now - source["lastSeen"] >= HEARTBEAT_MS:
+            lease_rejection = "stale-unproven-socket"
+        if lease_rejection:
+            raise fail(
+                "Lease expired; reconnect and baseline",
+                409,
+                reason=lease_rejection,
+            )
         body_hash = digest(json.dumps(value, separators=(",", ":")))
         if value["seq"] == source["seq"] and body_hash == source.get("bodyHash"):
             return {"seq": value["seq"], "duplicate": True}

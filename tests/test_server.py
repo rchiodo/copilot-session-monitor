@@ -167,6 +167,33 @@ async def test_status_becomes_healthy_once_bridge_is_ready(dashboard) -> None:
     assert body["notification"]["state"] == "ready"
 
 
+async def test_status_exposes_bounded_privacy_safe_reporter_diagnostics(dashboard) -> None:
+    server, client = dashboard
+    reporter_id = server.config["reporters"][0]["id"]
+    ws = object()
+    secret_lease = "c" * 64
+    for index in range(30):
+        server._record_reporter_event(
+            reporter_id,
+            "ws-1",
+            ws,
+            route="/v1/report",
+            stage="action-complete",
+            outcome="rejected",
+            reason="lease-mismatch",
+            value={"lease": secret_lease, "generation": index, "bootId": str(uuid.uuid4())},
+        )
+
+    resp = await client.request("GET", "/api/status")
+    body = await resp.json()
+    events = body["diagnostics"]["recentReporterEvents"]
+    assert len(events) == 24
+    assert events[-1]["reason"] == "lease-mismatch"
+    assert events[-1]["generation"] == 29
+    assert secret_lease not in json.dumps(events)
+    assert server.config["reporters"][0]["tokenHash"] not in json.dumps(events)
+
+
 async def test_existing_rows_marked_unconfirmed_until_bridge_ready(dashboard) -> None:
     server, client = dashboard
     reporter_id = server.config["reporters"][0]["id"]
@@ -457,6 +484,48 @@ async def test_new_socket_after_transport_loss_rejects_stale_persisted_lease(ing
         rejected = await _send(new_ws, "/v1/report", _report(reporter_id, lease, 2))
         assert rejected["status"] == 409
         assert rejected["error"] == "Lease expired; reconnect and baseline"
+
+
+async def test_socket_diagnostics_capture_acceptance_and_typed_409_ordering(ingest) -> None:
+    server, client = ingest
+    reporter_id, headers = _authorize_reporter(server)
+    connect_payload = {
+        "version": 1, "reporterId": reporter_id, "installationId": str(uuid.uuid4()),
+        "bootId": str(uuid.uuid4()), "generation": 7,
+    }
+
+    async with client.ws_connect("/v1/socket", headers=headers) as ws:
+        connected = await _send(ws, "/v1/connect", connect_payload)
+        lease = connected["body"]["lease"]
+        accepted = await _send(ws, "/v1/report", _report(reporter_id, lease, 1))
+        assert accepted["status"] == 200
+        rejected = await _send(ws, "/v1/report", _report(reporter_id, "f" * 64, 2))
+        assert rejected["status"] == 409
+
+    events = server.status()["diagnostics"]["recentReporterEvents"]
+    assert any(
+        event["route"] == "/v1/connect"
+        and event["stage"] == "action-complete"
+        and event["outcome"] == "accepted"
+        for event in events
+    )
+    assert any(
+        event["route"] == "/v1/report"
+        and event["stage"] == "action-complete"
+        and event["outcome"] == "accepted"
+        for event in events
+    )
+    rejection = next(
+        event for event in events
+        if event["route"] == "/v1/report"
+        and event["stage"] == "action-complete"
+        and event["outcome"] == "rejected"
+    )
+    assert rejection["reason"] == "lease-mismatch"
+    assert rejection["generation"] == 7
+    assert rejection["bootIdPrefix"] == connect_payload["bootId"][:8]
+    assert any(event["route"] == "socket" and event["stage"] == "close" for event in events)
+    assert lease not in json.dumps(events)
 
 
 async def test_successful_connect_binds_new_lease_to_socket(ingest) -> None:

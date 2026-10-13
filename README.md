@@ -94,7 +94,7 @@ Private keys, pairing files, and retained metadata live under Git-ignored `.loca
 - **Start fails:** check `.local\collector-error.log` / `watcher-error.log` for the relevant role.
 - **Watcher unavailable:** confirm the collector is running, the IP/port are correct, and an approved firewall rule permits that interface.
 - **TLS/auth error:** compare certificate fingerprints/expiry and system clocks; re-import the connection string rather than disabling TLS verification.
-- **Collector rejected request (409):** the console now prints the collector's specific reason (identity conflict, stale/expired lease, out-of-order sequence, etc.) — re-pair if needed.
+- **Collector rejected request (409):** use **Status** on both watcher and host. The watcher shows the latest correlated recovery phases, while the host shows bounded, privacy-safe socket/connect/report ordering with internal rejection reason codes. Successful self-healing stays quiet outside Status; re-pair only after the diagnostics show a persistent identity or pairing conflict.
 - **No cards / stuck Unconfirmed:** wait for a new naturally occurring run; dormant/uncertain isn't the same as finished.
 - **Port conflict:** stop this installation's existing roles, or choose separate free dashboard/ingestion ports.
 

@@ -40,6 +40,7 @@ def _fake_watcher() -> MagicMock:
     watcher.reset = None
     watcher.pairing = None
     watcher.health = {}
+    watcher.reporter = None
     watcher.stop = AsyncMock()
     watcher.apply_connection_string = AsyncMock()
     return watcher
@@ -152,6 +153,40 @@ async def test_collector_bridge_cmd_status_prints_each_source(capsys: Any) -> No
     assert "1/2 paired Windows watchers connected" in out
     assert "Laptop: healthy=True, lastSeen=2024-01-01T00:00:00.000Z, issue=None" in out
     assert "Desktop: healthy=False, lastSeen=never, issue=Watcher unavailable" in out
+
+
+async def test_collector_bridge_cmd_status_prints_recent_reporter_diagnostics(capsys: Any) -> None:
+    server = _fake_server()
+    server.status = MagicMock(return_value={
+        "coverage": "1/1 paired Windows watchers connected",
+        "sources": [
+            {"id": "a", "label": "Laptop", "healthy": True, "lastSeen": "2026-10-13T17:55:00Z", "issues": []},
+        ],
+        "diagnostics": {
+            "recentReporterEvents": [{
+                "at": "2026-10-13T17:55:01Z",
+                "reporterLabel": "Laptop",
+                "reporterIdPrefix": "12345678",
+                "socketId": "ws-4",
+                "route": "/v1/report",
+                "stage": "action-complete",
+                "outcome": "rejected",
+                "reason": "lease-mismatch",
+                "socketRegistered": True,
+                "socketCurrent": False,
+                "leaseProven": False,
+                "generation": 8,
+                "bootIdPrefix": "abcdef12",
+            }],
+        },
+    })
+    bridge = CollectorConsoleBridge(server, asyncio.Event())
+    await bridge.start()
+    await asyncio.get_running_loop().run_in_executor(None, bridge._cmd_status)
+    out = capsys.readouterr().out
+    assert "Recent reporter diagnostics" in out
+    assert "ws-4 /v1/report:action-complete rejected reason=lease-mismatch" in out
+    assert "registered=True current=False proven=False gen=8 boot=abcdef12" in out
 
 
 async def test_collector_bridge_cmd_test_schedules_test_notification() -> None:
@@ -347,6 +382,28 @@ async def test_watcher_bridge_cmd_status_paired(capsys: Any) -> None:
     bridge._cmd_status()
     out = capsys.readouterr().out
     assert "sub1" in out and "healthy=True" in out
+
+
+async def test_watcher_bridge_cmd_status_prints_recovery_phases(capsys: Any) -> None:
+    watcher = _fake_watcher()
+    watcher.pairing = {"label": "sub1"}
+    watcher.health = {"healthy": False, "issue": "Collector recovery r0002 failed"}
+    watcher.reporter = MagicMock()
+    watcher.reporter.recovery_diagnostics.return_value = [{
+        "at": "2026-10-13T17:55:02Z",
+        "recoveryId": "r0002",
+        "initialReport": {"outcome": "failed", "status": 409, "reason": "lease-expired"},
+        "reconnect": {"outcome": "accepted", "status": None, "reason": None},
+        "baselineRetry": {"outcome": "failed", "status": 409, "reason": "lease-expired"},
+    }]
+    bridge = WatcherConsoleBridge(watcher, asyncio.Event())
+    await bridge.start()
+    bridge._cmd_status()
+    out = capsys.readouterr().out
+    assert "Recent recovery diagnostics" in out
+    assert "r0002: initial-report=failed/409/lease-expired" in out
+    assert "reconnect=accepted" in out
+    assert "baseline-retry=failed/409/lease-expired" in out
 
 
 async def test_watcher_bridge_cmd_connect_blank_cancels(monkeypatch: pytest.MonkeyPatch, capsys: Any) -> None:
