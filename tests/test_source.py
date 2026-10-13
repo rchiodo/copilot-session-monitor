@@ -3,6 +3,7 @@ adapter: ownership detection, hierarchy linkage, and activity tailing.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -10,9 +11,12 @@ import sqlite3
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import pymonitor.protocol as protocol_module
+import pymonitor.source as source_module
 from pymonitor.source import LocalSource, desktop_rows
 
 LOCAL_ID = "11111111-1111-1111-1111-111111111111"
@@ -295,19 +299,76 @@ async def test_attached_background_work_with_is_running_0_is_discovered_under_it
     assert next(row for row in result2["samples"] if row["id"] == LOCAL_ID)["busy"] is True
 
 
-async def test_sdk_discover_seam_surfaces_cli_only_sessions_found_by_the_injected_callable(fixture):
-    """Exercises the LocalSource(sdk_discover=...) injection seam directly,
-    standing in for github-copilot-sdk's Client.list_sessions() (see
-    docs/porting-notes.md "SDK discovery"). Bypasses the autouse directory-scan
-    fixture to prove the seam itself -- not just the merge logic -- is wired.
-    """
+async def test_default_sdk_discovery_uses_summary_and_filters_invalid_ids(
+    fixture, directory_scan_sdk_discover
+):
     home, owner = fixture["home"], fixture["owner"]
-    calls = 0
+    metadata = [
+        SimpleNamespace(
+            session_id=CLI_ID,
+            summary="Original CLI title",
+            context=SimpleNamespace(working_directory="C:\\sdk\\project"),
+        ),
+        SimpleNamespace(session_id="not-a-uuid", summary="Invalid", context=None),
+    ]
 
-    async def fake_sdk_discover() -> list[str]:
-        nonlocal calls
-        calls += 1
-        return [CLI_ID, "not-a-uuid"]
+    class FakeSdkClient:
+        calls = 0
+
+        async def list_sessions(self) -> list[object]:
+            self.calls += 1
+            return metadata
+
+    async def invoke_production_discover() -> list[object]:
+        return await directory_scan_sdk_discover(source)
+
+    source = LocalSource(
+        home,
+        lambda: {"at": time.time() * 1000, "processes": [owner]},
+        sdk_discover=invoke_production_discover,
+    )
+    client = FakeSdkClient()
+    source._sdk_client = client
+    result = await source.poll()
+    cli = next(row for row in result["samples"] if row["id"] == CLI_ID)
+    assert cli["source"] == "CLI (activity only)"
+    assert cli["title"] == "Original CLI title"
+    assert client.calls == 1
+    # Non-UUID ids returned by a (possibly misbehaving) SDK are filtered out.
+    assert not any(row["id"] == "not-a-uuid" for row in result["samples"])
+
+
+async def test_sdk_summary_is_normalized_to_a_valid_protocol_title(fixture):
+    home, owner = fixture["home"], fixture["owner"]
+    summary = f"{'x' * 300}\n{'y' * 300}"
+
+    async def fake_sdk_discover() -> list[object]:
+        return [SimpleNamespace(session_id=CLI_ID, summary=summary, context=None)]
+
+    source = LocalSource(
+        home,
+        lambda: {"at": time.time() * 1000, "processes": [owner]},
+        sdk_discover=fake_sdk_discover,
+    )
+    result = await source.poll()
+    title = next(row["title"] for row in result["samples"] if row["id"] == CLI_ID)
+    assert title == f"{'x' * 300} {'y' * 211}"
+    assert len(title) == protocol_module.TITLE_MAX_CHARS
+    protocol_module._text(title)
+
+
+@pytest.mark.parametrize(
+    "discovered",
+    [
+        CLI_ID,
+        SimpleNamespace(session_id=CLI_ID, summary="   ", context=None),
+    ],
+)
+async def test_sdk_discover_missing_or_blank_summary_keeps_event_cwd_title_fallback(fixture, discovered):
+    home, owner = fixture["home"], fixture["owner"]
+
+    async def fake_sdk_discover() -> list[object]:
+        return [discovered]
 
     source = LocalSource(
         home,
@@ -316,10 +377,69 @@ async def test_sdk_discover_seam_surfaces_cli_only_sessions_found_by_the_injecte
     )
     result = await source.poll()
     cli = next(row for row in result["samples"] if row["id"] == CLI_ID)
-    assert cli["source"] == "CLI (activity only)"
-    assert calls == 1
-    # Non-UUID ids returned by a (possibly misbehaving) SDK are filtered out.
-    assert not any(row["id"] == "not-a-uuid" for row in result["samples"])
+    assert cli["title"] == f"project - CLI {CLI_ID[:8]}"
+
+
+async def test_sdk_context_working_directory_fills_missing_event_cwd(fixture):
+    home, owner = fixture["home"], fixture["owner"]
+    events_path = Path(home) / "session-state" / CLI_ID / "events.jsonl"
+    events_path.write_text(
+        _events_blob(
+            [
+                {
+                    "id": "start",
+                    "type": "assistant.turn_start",
+                    "timestamp": _now_iso(),
+                    "data": {"turnId": "0", "interactionId": "run"},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    async def fake_sdk_discover() -> list[object]:
+        return [
+            SimpleNamespace(
+                session_id=CLI_ID,
+                summary=None,
+                context=SimpleNamespace(working_directory="C:\\sdk\\fallback-project"),
+            )
+        ]
+
+    source = LocalSource(
+        home,
+        lambda: {"at": time.time() * 1000, "processes": [owner]},
+        sdk_discover=fake_sdk_discover,
+    )
+    result = await source.poll()
+    cli = next(row for row in result["samples"] if row["id"] == CLI_ID)
+    assert cli["title"] == f"fallback-project - CLI {CLI_ID[:8]}"
+
+
+async def test_background_sdk_discovery_preserves_metadata(fixture, monkeypatch: pytest.MonkeyPatch):
+    home, owner = fixture["home"], fixture["owner"]
+    release = asyncio.Event()
+
+    async def slow_sdk_discover() -> list[object]:
+        await release.wait()
+        return [SimpleNamespace(session_id=CLI_ID, summary="Background CLI title", context=None)]
+
+    monkeypatch.setattr(source_module, "DISCOVERY_INLINE_BUDGET_S", 0.001)
+    source = LocalSource(
+        home,
+        lambda: {"at": time.time() * 1000, "processes": [owner]},
+        sdk_discover=slow_sdk_discover,
+    )
+    first = await source.poll()
+    assert not any(row["id"] == CLI_ID for row in first["samples"])
+    assert source._discovery_task is not None
+
+    release.set()
+    await source._discovery_task
+    second = await source.poll()
+    cli = next(row for row in second["samples"] if row["id"] == CLI_ID)
+    assert cli["title"] == "Background CLI title"
+    assert source._discovery_task is None
 
 
 async def test_sdk_discover_failure_is_reported_as_an_issue_and_does_not_crash_poll(fixture):

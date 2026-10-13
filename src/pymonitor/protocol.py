@@ -37,7 +37,7 @@ if TYPE_CHECKING:  # pragma: no cover
     from aiohttp import web
 
 __all__ = [
-    "VERSION", "HEARTBEAT_MS", "MAX_BYTES", "UUID_RE", "HASH_RE", "CONNECTION_PREFIX",
+    "VERSION", "HEARTBEAT_MS", "MAX_BYTES", "TITLE_MAX_CHARS", "UUID_RE", "HASH_RE", "CONNECTION_PREFIX",
     "digest", "metadata", "observed_metadata", "ProtocolError", "fail",
     "validate_connect", "validate_report", "read_json", "authorized", "private_address",
     "validate_pairing", "encode_connection_string", "decode_connection_string", "request",
@@ -58,6 +58,7 @@ VERSION = 1
 # fresh lease-expiry 409 on an already-recovering connection.
 HEARTBEAT_MS = 25000
 MAX_BYTES = 4 * 1024 * 1024
+TITLE_MAX_CHARS = 512
 # How long a reporter waits for the collector's reply to a single request
 # over the persistent socket before treating the transport as unavailable.
 # The collector serializes all reporters' connect/report/disconnect work
@@ -103,7 +104,7 @@ def _object(value: Any, keys: list[str]) -> None:
         raise fail("Unexpected metadata fields")
 
 
-def _text(value: Any, max_len: int = 512, nullable: bool = False) -> None:
+def _text(value: Any, max_len: int = TITLE_MAX_CHARS, nullable: bool = False) -> None:
     if nullable and value is None:
         return
     if not isinstance(value, str) or not value or len(value) > max_len or re.search(r"[\x00-\x1f]", value):

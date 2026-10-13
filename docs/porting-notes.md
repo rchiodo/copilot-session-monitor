@@ -15,7 +15,7 @@ byte-for-byte because it fixes a previously-shipped bug.
 | `hierarchy.mjs`      | `hierarchy.py`            | Parent/child linkage, related-metadata resolution. |
 | `families.mjs`      | `families.py`             | `FamilyMonitor`, `group_families`, dismiss validation. |
 | `actions.mjs`       | `actions.py`              | `MonitorActions` (serializing dismiss queue), `read_dismiss_entries`. |
-| `source.mjs`        | `source.py`               | `LocalSource` -- desktop-app DB/events adapter. SDK swap point: `_discover_cli_session_ids()` (done). |
+| `source.mjs`        | `source.py`               | `LocalSource` -- desktop-app DB/events adapter. SDK swap point: `_discover_cli_sessions()` (done). |
 | `local-report.mjs`  | `local_report.py`         | Shared local-poll logic used by both watcher and in-process collector self-source. |
 | `protocol.mjs`       | `protocol.py`             | JSON protocol v1 bounds, observed-metadata shaping. |
 | `configuration.mjs`  | `configuration.py`         | Done -- config read/save, collector validation, `initialize`/`pair`/`migrate_legacy`/`configuration_command` CLI dispatcher. |
@@ -34,10 +34,10 @@ CLI's on-disk storage format.
 
 The Python port keeps that hand-parsing for family/hierarchy/activity detail
 (there is no SDK surface for that), but swaps the *session identity discovery*
-step -- "which CLI session IDs currently exist for this machine" -- to use the
+step -- "which CLI sessions currently exist for this machine" -- to use the
 official Copilot SDK for Python (`github-copilot-sdk`, package import name
 `copilot`) via `CopilotClient.list_sessions()`. This boundary is isolated in
-`LocalSource._discover_cli_session_ids()` / `_default_sdk_discover()` in
+`LocalSource._discover_cli_sessions()` / `_default_sdk_discover()` in
 `source.py`.
 
 Implementation notes (confirmed against the installed `github-copilot-sdk==1.0.15`
@@ -45,7 +45,12 @@ package, not assumed from the Go client):
 
 - `SessionMetadata`'s fields are **snake_case** in Python
   (`session_id`, `start_time`, `modified_time`, `is_remote`, `summary`,
-  `context`), not the PascalCase the Go client's naming implied.
+  `context`), not the PascalCase the Go client's naming implied. Discovery
+  preserves `summary` for CLI-only card titles and the supported
+  `context.working_directory` as a cwd fallback; it never reads transcript
+  content to synthesize a title. SDK summaries are trimmed, protocol-forbidden
+  control characters are collapsed to spaces, and titles are capped at the
+  wire protocol's shared 512-character limit before entering a watcher report.
 - `CopilotClient.list_sessions()` is async and, with no `connection` argument,
   `CopilotClient.start()` spawns the real bundled CLI binary as a child
   process over stdio. Spawning per poll cycle would be far too heavy, so
@@ -56,19 +61,19 @@ package, not assumed from the Go client):
   session state from the exact same `~/.copilot`-equivalent directory the
   hand-parsing code already uses (it sets `COPILOT_HOME` on the spawned
   runtime).
-- `_discover_cli_session_ids()` takes an injectable `sdk_discover` async
+- `_discover_cli_sessions()` takes an injectable `sdk_discover` async
   callable (constructor arg on `LocalSource`) so tests never spawn a real CLI
-  process; `tests/conftest.py` installs a directory-scan stand-in as an
-  autouse fixture (functionally identical to the old hand-list behavior) so
+  process. It accepts legacy string IDs and SDK-shaped metadata objects,
+  normalizing valid UUID sessions into a metadata map. `tests/conftest.py`
+  installs a string-id directory-scan stand-in as an autouse fixture so
   existing merge-logic tests are unaffected by the swap, and
-  `tests/test_source.py`'s `test_sdk_discover_seam_surfaces_cli_only_sessions_found_by_the_injected_callable`
-  / `test_sdk_discover_failure_is_reported_as_an_issue_and_does_not_crash_poll`
-  exercise the seam itself directly (including a non-UUID-filtering check and
-  a failure-degrades-gracefully check).
+  focused `tests/test_source.py` tests exercise the production discovery
+  method with a fake SDK client plus the injection seam directly (including
+  non-UUID filtering and failure-degrades-gracefully checks).
 - Unlike the original JS (`readdir` not wrapped in try/catch -- a failure
   there fails the whole `poll()` cycle), the SDK call is deliberately wrapped
   in broad exception handling at the `poll()` call site: a failure appends an
-  issue message, keeps `directory_ids` at its last-known-good value, and
+  issue message, keeps `directory_sessions` at its last-known-good value, and
   still advances `discovered_at` (to avoid a tight retry loop against a
   broken SDK/subprocess). This is a reasoned divergence from literal JS
   parity: an RPC/subprocess failure is both more likely and more disruptive
@@ -207,10 +212,11 @@ silently regress during a line-by-line port):
 Unit tests are ported file-by-file from `test/*.test.mjs` to `tests/test_*.py`
 with 1:1 test-case correspondence (including parametrized loop tests). This
 is a correctness gate independent of the SDK: `tests/conftest.py` installs a
-directory-scan stand-in for `LocalSource._default_sdk_discover` as an autouse
-fixture, so merge-logic tests never spawn a real CLI process, while
-`tests/test_source.py`'s two `test_sdk_discover_*` tests exercise the real
-injection seam end-to-end with fake async callables.
+string-id directory-scan stand-in for `LocalSource._default_sdk_discover` as
+an autouse fixture, so merge-logic tests never spawn a real CLI process,
+while focused `tests/test_source.py` tests exercise metadata normalization,
+fallback titles, background discovery, UUID filtering, and failure handling
+end-to-end with fake async callables.
 
 `test/self-observation.test.mjs` (full integration test spawning real
 `server.mjs`/`configuration.mjs`/`reporter.mjs` child processes) is deferred

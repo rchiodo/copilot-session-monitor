@@ -7,14 +7,15 @@ equivalent (no parent/child linkage, no live busy/idle field, no
 per-turn granularity in SessionMetadata).
 
 SDK integration point (see docs/porting-notes.md "SDK discovery"): the
-CLI-only id discovery in `_discover_cli_session_ids()` below is backed by
+CLI-only metadata discovery in `_discover_cli_sessions()` below is backed by
 github-copilot-sdk's `CopilotClient.list_sessions()` rather than hand-listing
-~/.copilot/session-state/*/. Busy/idle detection still comes from JsonlTail,
-unchanged -- SessionMetadata has no live status field. A single CopilotClient
-is lazily started and reused for the life of a LocalSource instance (spawning
-the bundled CLI process per poll would be far too heavy). `sdk_discover` is
-an injectable async override so tests can supply canned ids without spawning
-a real CLI process.
+~/.copilot/session-state/*/. SessionMetadata.summary supplies CLI-only card
+titles when available; busy/idle detection still comes from JsonlTail,
+unchanged -- SessionMetadata has no live status field. A single
+CopilotClient is lazily started and reused for the life of a LocalSource
+instance (spawning the bundled CLI process per poll would be far too heavy).
+`sdk_discover` is an injectable async override so tests can supply canned
+string ids or metadata objects without spawning a real CLI process.
 """
 from __future__ import annotations
 
@@ -24,9 +25,11 @@ import ntpath
 import os
 import re
 import time
+from dataclasses import dataclass
 from typing import Any, Awaitable, Callable
 
 from .events import JsonlTail
+from .protocol import TITLE_MAX_CHARS
 
 try:
     import psutil
@@ -36,6 +39,7 @@ except ImportError:  # pragma: no cover - psutil is a hard dependency at runtime
 from .hierarchy import hierarchy_index, related_metadata, selected_hierarchy
 
 SESSION_ID = re.compile(r"^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$", re.IGNORECASE)
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f]+")
 
 ProcessSnapshot = Callable[[], dict[str, Any] | None]
 
@@ -66,6 +70,13 @@ def _error_label(error: BaseException) -> str:
     if code is not None and code in errno.errorcode:
         return errno.errorcode[code]
     return type(error).__name__
+
+
+def _normalize_sdk_summary(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    summary = _CONTROL_CHARACTERS.sub(" ", value).strip()
+    return summary[:TITLE_MAX_CHARS] or None
 
 
 def _pid_alive(pid: int) -> bool:
@@ -161,7 +172,14 @@ def desktop_rows(file: str) -> list[dict[str, Any]]:
 _LOCK_RE = re.compile(r"^inuse\.(\d+)\.lock$")
 
 
-SdkDiscover = Callable[[], Awaitable[list[str]]]
+SdkDiscover = Callable[[], Awaitable[list[Any]]]
+
+
+@dataclass(frozen=True)
+class _CliSessionMetadata:
+    session_id: str
+    summary: str | None = None
+    working_directory: str | None = None
 
 
 class LocalSource:
@@ -178,12 +196,12 @@ class LocalSource:
         self.tails: dict[str, JsonlTail] = {}
         self.live_ids: set[str] = set()
         self.tracked: set[str] = set()
-        self.directory_ids: list[str] = []
+        self.directory_sessions: dict[str, _CliSessionMetadata] = {}
         self.discovered_at = 0.0
         # In-flight background discovery refresh, if the inline budget was
         # exceeded (see DISCOVERY_INLINE_BUDGET_S and poll()). None when no
         # refresh is currently running.
-        self._discovery_task: asyncio.Task[list[str]] | None = None
+        self._discovery_task: asyncio.Task[dict[str, _CliSessionMetadata]] | None = None
         # Test-only override; production callers rely on the real SDK-backed
         # default (_default_sdk_discover), lazily started on first use.
         self._sdk_discover_override = sdk_discover
@@ -339,16 +357,18 @@ class LocalSource:
         # blocking a poll cycle for its full duration.
         if self._discovery_task is not None and self._discovery_task.done():
             try:
-                self.directory_ids = self._discovery_task.result()
+                self.directory_sessions = self._discovery_task.result()
             except Exception as error:  # noqa: BLE001 - SDK/subprocess failures must not crash a poll cycle
                 issues.append(f"CLI session discovery unavailable ({_error_label(error)})")
             self._discovery_task = None
             self.discovered_at = now_ms
 
         if self._discovery_task is None and now_ms - self.discovered_at > 5000:
-            task = asyncio.ensure_future(self._discover_cli_session_ids())
+            task = asyncio.ensure_future(self._discover_cli_sessions())
             try:
-                self.directory_ids = await asyncio.wait_for(asyncio.shield(task), timeout=DISCOVERY_INLINE_BUDGET_S)
+                self.directory_sessions = await asyncio.wait_for(
+                    asyncio.shield(task), timeout=DISCOVERY_INLINE_BUDGET_S
+                )
             except TimeoutError:
                 # Still running past the inline budget (e.g. the real SDK's
                 # list_sessions() with many accumulated session directories).
@@ -363,7 +383,7 @@ class LocalSource:
             else:
                 self.discovered_at = now_ms
 
-        for id_ in self.directory_ids:
+        for id_, metadata in self.directory_sessions.items():
             if id_ in known_ids:
                 continue
             try:
@@ -373,7 +393,11 @@ class LocalSource:
                 tail = self.tails.setdefault(id_, JsonlTail(os.path.join(self.root, id_, "events.jsonl")))
                 events = await tail.read()
                 cwd = events.get("cwd")
-                title = f"{ntpath.basename(cwd)} - CLI {id_[:8]}" if cwd else f"CLI {id_[:8]}"
+                if not isinstance(cwd, str) or not cwd.strip():
+                    cwd = metadata.working_directory
+                title = metadata.summary
+                if not title:
+                    title = f"{ntpath.basename(cwd)} - CLI {id_[:8]}" if cwd else f"CLI {id_[:8]}"
                 samples.append({
                     "id": id_,
                     "title": title,
@@ -397,20 +421,44 @@ class LocalSource:
             ),
         }
 
-    async def _discover_cli_session_ids(self) -> list[str]:
-        """Which Copilot CLI session ids exist, via the official SDK.
+    async def _discover_cli_sessions(self) -> dict[str, _CliSessionMetadata]:
+        """Which Copilot CLI sessions exist, via the official SDK.
 
         This is the one architectural change requested for this port: no
         more hand-listing ~/.copilot/session-state/*/. `sdk_discover`
-        (constructor arg) lets tests supply canned ids without spawning a
-        real CLI process; production code falls through to
+        (constructor arg) lets tests supply canned string ids or SDK-shaped
+        metadata without spawning a real CLI process; production code falls through to
         `_default_sdk_discover`.
         """
         discover = self._sdk_discover_override or self._default_sdk_discover
-        ids = await discover()
-        return [id_ for id_ in ids if SESSION_ID.match(id_)]
+        discovered = await discover()
+        sessions: dict[str, _CliSessionMetadata] = {}
+        for item in discovered:
+            if isinstance(item, str):
+                session_id = item
+                summary = None
+                working_directory = None
+            else:
+                session_id = getattr(item, "session_id", None)
+                summary = getattr(item, "summary", None)
+                context = getattr(item, "context", None)
+                working_directory = getattr(context, "working_directory", None)
+            if not isinstance(session_id, str) or not SESSION_ID.match(session_id):
+                continue
+            summary = _normalize_sdk_summary(summary)
+            if not isinstance(working_directory, str) or not working_directory.strip():
+                working_directory = None
+            else:
+                working_directory = working_directory.strip()
+            previous = sessions.get(session_id)
+            sessions[session_id] = _CliSessionMetadata(
+                session_id=session_id,
+                summary=summary or (previous.summary if previous else None),
+                working_directory=working_directory or (previous.working_directory if previous else None),
+            )
+        return sessions
 
-    async def _default_sdk_discover(self) -> list[str]:
+    async def _default_sdk_discover(self) -> list[Any]:
         import copilot  # deferred import: optional at module import time, like psutil above
 
         client = self._sdk_client
@@ -418,8 +466,7 @@ class LocalSource:
             client = copilot.CopilotClient(base_directory=self.home)
             await client.start()
             self._sdk_client = client
-        sessions = await client.list_sessions()
-        return [session.session_id for session in sessions]
+        return await client.list_sessions()
 
     async def aclose(self) -> None:
         """Stop the lazily-started SDK client, if one was created."""
